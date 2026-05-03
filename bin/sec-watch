@@ -307,6 +307,35 @@ write_trivy_dependency_report() {
         | [(.key + 1), .value.severity, .value.package, .value.installed, .value.fixed, .value.target, .value.id, .value.title]
         | @tsv
       ' 2>/dev/null
+    printf '\n'
+    printf 'All findings\n'
+    printf '#\tSeverity\tPackage\tInstalled\tFixed\tTarget\tVulnerability\tTitle\n'
+    printf '%s\n' "$json" |
+      jq -r '
+        def rank($severity):
+          if $severity == "CRITICAL" then 0
+          elif $severity == "HIGH" then 1
+          elif $severity == "MEDIUM" then 2
+          elif $severity == "LOW" then 3
+          else 4 end;
+        [.Results[]?
+          | .Target as $target
+          | .Vulnerabilities[]?
+          | {
+              rank: rank(.Severity),
+              severity: .Severity,
+              package: .PkgName,
+              installed: (.InstalledVersion // "-"),
+              fixed: (.FixedVersion // "-"),
+              target: $target,
+              id: .VulnerabilityID,
+              title: ((.Title // .Description // "") | gsub("[\t\r\n]+"; " ") | .[0:160])
+            }]
+        | sort_by(.rank, .package, .id)
+        | to_entries[]
+        | [(.key + 1), .value.severity, .value.package, .value.installed, .value.fixed, .value.target, .value.id, .value.title]
+        | @tsv
+      ' 2>/dev/null
   } > "$DEP_REPORT_FILE"
 
   {
@@ -372,6 +401,36 @@ write_trivy_dependency_report() {
           | select(.Severity == "CRITICAL" or .Severity == "HIGH")
           | {
               rank: (if .Severity == "CRITICAL" then 0 else 1 end),
+              severity: .Severity,
+              package: .PkgName,
+              installed: (.InstalledVersion // "-"),
+              fixed: (.FixedVersion // "-"),
+              target: $target,
+              id: .VulnerabilityID,
+              url: (.PrimaryURL // ""),
+              title: ((.Title // .Description // "") | gsub("[\t\r\n]+"; " "))
+            }]
+        | sort_by(.rank, .package, .id)
+        | to_entries[]
+        | "<tr><td class=\"num\">\(.key + 1)</td><td class=\"sev-\(.value.severity)\">\(.value.severity | esc)</td><td>\(.value.package | esc)</td><td>\(.value.installed | esc)</td><td>\(.value.fixed | esc)</td><td>\(.value.target | esc)</td><td><a href=\"\(.value.url | esc)\">\(.value.id | esc)</a></td><td>\(.value.title | esc)</td></tr>"
+      ' 2>/dev/null
+    printf '%s\n' '</tbody></table>'
+    printf '%s\n' '<h2>All Findings</h2>'
+    printf '%s\n' '<table><thead><tr><th class="num">#</th><th class="severity">Severity</th><th class="package">Package</th><th class="version">Installed</th><th class="fixed">Fixed</th><th class="target">Target</th><th class="vuln">Vulnerability</th><th>Title</th></tr></thead><tbody>'
+    printf '%s\n' "$json" |
+      jq -r '
+        def esc: tostring | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\""; "&quot;");
+        def rank($severity):
+          if $severity == "CRITICAL" then 0
+          elif $severity == "HIGH" then 1
+          elif $severity == "MEDIUM" then 2
+          elif $severity == "LOW" then 3
+          else 4 end;
+        [.Results[]?
+          | .Target as $target
+          | .Vulnerabilities[]?
+          | {
+              rank: rank(.Severity),
               severity: .Severity,
               package: .PkgName,
               installed: (.InstalledVersion // "-"),
