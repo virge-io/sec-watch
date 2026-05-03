@@ -1,0 +1,31 @@
+Security dependency report
+Generated: 2026-05-03 12:00:00
+Projects: ~/Projects
+Scanner: trivy
+
+Summary
+Critical: 1
+High: 2
+Medium: 1
+Low: 1
+Total: 5
+Recent high/critical changes (7 days): 1
+
+Recent important changes
+#	Severity	Changed	Package	Installed	Fixed	Target	Vulnerability	Title
+1	HIGH	2026-05-01	example-http-client	1.4.0	1.4.3	web-app/package-lock.json	CVE-2026-0002	Example request smuggling issue in HTTP client dependency
+
+Important findings
+#	Severity	Package	Installed	Fixed	Target	Vulnerability	Title
+1	CRITICAL	example-template	2.1.0	2.1.5	web-app/package-lock.json	CVE-2026-0001	Example arbitrary code execution in template parser
+2	HIGH	example-http-client	1.4.0	1.4.3	web-app/package-lock.json	CVE-2026-0002	Example request smuggling issue in HTTP client dependency
+3	HIGH	example-yaml	0.9.1	0.9.4	api/requirements.txt	CVE-2026-0003	Example denial of service in YAML parser
+
+All findings
+#	Severity	Package	Installed	Fixed	Target	Vulnerability	Title
+1	CRITICAL	example-template	2.1.0	2.1.5	web-app/package-lock.json	CVE-2026-0001	Example arbitrary code execution in template parser
+2	HIGH	example-http-client	1.4.0	1.4.3	web-app/package-lock.json	CVE-2026-0002	Example request smuggling issue in HTTP client dependency
+3	HIGH	example-yaml	0.9.1	0.9.4	api/requirements.txt	CVE-2026-0003	Example denial of service in YAML parser
+4	MEDIUM	example-router	5.2.0	5.2.2	web-app/package-lock.json	CVE-2026-0004	Example open redirect in router helper
+5	LOW	example-build-tool	3.0.0	3.0.1	worker/pyproject.toml	CVE-2026-0005	Example information disclosure in build-time logging
+

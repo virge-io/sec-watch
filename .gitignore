@@ -1,6 +1,5 @@
 .cache/
 *.log
 gschemas.compiled
-dependency-report.*
+/dependency-report.*
 status.env
-

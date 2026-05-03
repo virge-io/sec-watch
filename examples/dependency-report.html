@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Security Dependency Report</title>
+  <style>
+    body{font:14px system-ui,sans-serif;margin:24px;color:#202124;background:#fff;}
+    h1{font-size:22px;margin:0 0 8px;} h2{font-size:18px;margin-top:28px;}
+    .meta{color:#5f6368;margin-bottom:18px;} .summary{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0;}
+    .pill{border:1px solid #dadce0;border-radius:6px;padding:6px 10px;background:#f8f9fa;}
+    table{border-collapse:collapse;width:100%;table-layout:fixed;}
+    th,td{border-bottom:1px solid #e0e0e0;padding:6px 8px;text-align:left;vertical-align:top;}
+    th{position:sticky;top:0;background:#f8f9fa;z-index:1;} td{word-break:break-word;}
+    .num{width:48px;color:#5f6368;text-align:right;}
+    .sev-CRITICAL{color:#b00020;font-weight:700;} .sev-HIGH{color:#d84315;font-weight:700;}
+    .fixed{width:130px}.version{width:110px}.date{width:100px}.vuln{width:150px}.severity{width:90px}.target{width:260px}.package{width:150px}
+  </style>
+</head>
+<body>
+  <h1>Security Dependency Report</h1>
+  <div class="meta">
+    Generated: 2026-05-03 12:00:00<br>
+    Projects: ~/Projects<br>
+    Scanner: trivy
+  </div>
+
+  <div class="summary">
+    <div class="pill">Critical: 1</div>
+    <div class="pill">High: 2</div>
+    <div class="pill">Medium: 1</div>
+    <div class="pill">Low: 1</div>
+    <div class="pill">Total: 5</div>
+    <div class="pill">Recent high/critical changes: 1</div>
+  </div>
+
+  <h2>Recent Important Changes</h2>
+  <table>
+    <thead>
+      <tr>
+        <th class="num">#</th>
+        <th class="severity">Severity</th>
+        <th class="date">Changed</th>
+        <th class="package">Package</th>
+        <th class="version">Installed</th>
+        <th class="fixed">Fixed</th>
+        <th class="target">Target</th>
+        <th class="vuln">Vulnerability</th>
+        <th>Title</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="num">1</td>
+        <td class="sev-HIGH">HIGH</td>
+        <td>2026-05-01</td>
+        <td>example-http-client</td>
+        <td>1.4.0</td>
+        <td>1.4.3</td>
+        <td>web-app/package-lock.json</td>
+        <td><a href="https://example.invalid/CVE-2026-0002">CVE-2026-0002</a></td>
+        <td>Example request smuggling issue in HTTP client dependency</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Important Findings</h2>
+  <table>
+    <thead>
+      <tr>
+        <th class="num">#</th>
+        <th class="severity">Severity</th>
+        <th class="package">Package</th>
+        <th class="version">Installed</th>
+        <th class="fixed">Fixed</th>
+        <th class="target">Target</th>
+        <th class="vuln">Vulnerability</th>
+        <th>Title</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="num">1</td>
+        <td class="sev-CRITICAL">CRITICAL</td>
+        <td>example-template</td>
+        <td>2.1.0</td>
+        <td>2.1.5</td>
+        <td>web-app/package-lock.json</td>
+        <td><a href="https://example.invalid/CVE-2026-0001">CVE-2026-0001</a></td>
+        <td>Example arbitrary code execution in template parser</td>
+      </tr>
+      <tr>
+        <td class="num">2</td>
+        <td class="sev-HIGH">HIGH</td>
+        <td>example-http-client</td>
+        <td>1.4.0</td>
+        <td>1.4.3</td>
+        <td>web-app/package-lock.json</td>
+        <td><a href="https://example.invalid/CVE-2026-0002">CVE-2026-0002</a></td>
+        <td>Example request smuggling issue in HTTP client dependency</td>
+      </tr>
+      <tr>
+        <td class="num">3</td>
+        <td class="sev-HIGH">HIGH</td>
+        <td>example-yaml</td>
+        <td>0.9.1</td>
+        <td>0.9.4</td>
+        <td>api/requirements.txt</td>
+        <td><a href="https://example.invalid/CVE-2026-0003">CVE-2026-0003</a></td>
+        <td>Example denial of service in YAML parser</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>All Findings</h2>
+  <table>
+    <thead>
+      <tr>
+        <th class="num">#</th>
+        <th class="severity">Severity</th>
+        <th class="package">Package</th>
+        <th class="version">Installed</th>
+        <th class="fixed">Fixed</th>
+        <th class="target">Target</th>
+        <th class="vuln">Vulnerability</th>
+        <th>Title</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td class="num">1</td>
+        <td class="sev-CRITICAL">CRITICAL</td>
+        <td>example-template</td>
+        <td>2.1.0</td>
+        <td>2.1.5</td>
+        <td>web-app/package-lock.json</td>
+        <td><a href="https://example.invalid/CVE-2026-0001">CVE-2026-0001</a></td>
+        <td>Example arbitrary code execution in template parser</td>
+      </tr>
+      <tr>
+        <td class="num">2</td>
+        <td class="sev-HIGH">HIGH</td>
+        <td>example-http-client</td>
+        <td>1.4.0</td>
+        <td>1.4.3</td>
+        <td>web-app/package-lock.json</td>
+        <td><a href="https://example.invalid/CVE-2026-0002">CVE-2026-0002</a></td>
+        <td>Example request smuggling issue in HTTP client dependency</td>
+      </tr>
+      <tr>
+        <td class="num">3</td>
+        <td class="sev-HIGH">HIGH</td>
+        <td>example-yaml</td>
+        <td>0.9.1</td>
+        <td>0.9.4</td>
+        <td>api/requirements.txt</td>
+        <td><a href="https://example.invalid/CVE-2026-0003">CVE-2026-0003</a></td>
+        <td>Example denial of service in YAML parser</td>
+      </tr>
+      <tr>
+        <td class="num">4</td>
+        <td>MEDIUM</td>
+        <td>example-router</td>
+        <td>5.2.0</td>
+        <td>5.2.2</td>
+        <td>web-app/package-lock.json</td>
+        <td><a href="https://example.invalid/CVE-2026-0004">CVE-2026-0004</a></td>
+        <td>Example open redirect in router helper</td>
+      </tr>
+      <tr>
+        <td class="num">5</td>
+        <td>LOW</td>
+        <td>example-build-tool</td>
+        <td>3.0.0</td>
+        <td>3.0.1</td>
+        <td>worker/pyproject.toml</td>
+        <td><a href="https://example.invalid/CVE-2026-0005">CVE-2026-0005</a></td>
+        <td>Example information disclosure in build-time logging</td>
+      </tr>
+    </tbody>
+  </table>
+</body>
+</html>
+

@@ -81,6 +81,13 @@ Generated reports are written to:
 
 They are not tracked by git.
 
+Sanitized example reports are tracked for reference:
+
+```text
+examples/dependency-report.html
+examples/dependency-report.txt
+```
+
 ## Development
 
 After changing the schema:
@@ -98,4 +105,3 @@ gnome-extensions enable sec-watch@local
 ```
 
 On Wayland, logging out and back in is often the cleanest way to reload extension code.
-
