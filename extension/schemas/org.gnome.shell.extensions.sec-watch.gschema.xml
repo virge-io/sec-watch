@@ -1,0 +1,33 @@
+<schemalist>
+  <schema id="org.gnome.shell.extensions.sec-watch" path="/org/gnome/shell/extensions/sec-watch/">
+    <key name="projects-dir" type="s">
+      <default>""</default>
+      <summary>Root directory containing projects to scan</summary>
+    </key>
+    <key name="selected-projects" type="as">
+      <default>[]</default>
+      <summary>Selected project folder names. Empty means all projects.</summary>
+    </key>
+    <key name="enabled-ecosystems" type="as">
+      <default>['npm', 'yarn', 'pnpm', 'pip', 'poetry', 'uv', 'python-pkg']</default>
+      <summary>Enabled Trivy dependency ecosystems</summary>
+    </key>
+    <key name="scan-interval" type="i">
+      <range min="300" max="86400"/>
+      <default>1800</default>
+      <summary>Scan interval in seconds</summary>
+    </key>
+    <key name="enabled-public-feeds" type="as">
+      <default>['manual', 'cisa-kev', 'nvd-recent']</default>
+      <summary>Enabled public vulnerability watch feeds</summary>
+    </key>
+    <key name="notification-categories" type="as">
+      <default>['fedora', 'dep-critical', 'dep-high', 'watch']</default>
+      <summary>Categories that trigger notifications when their count increases</summary>
+    </key>
+    <key name="watch-lockfiles" type="b">
+      <default>true</default>
+      <summary>Whether to rescan when dependency lockfiles change</summary>
+    </key>
+  </schema>
+</schemalist>

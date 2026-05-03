@@ -1,0 +1,6 @@
+.cache/
+*.log
+gschemas.compiled
+dependency-report.*
+status.env
+

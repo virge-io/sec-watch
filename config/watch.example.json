@@ -1,0 +1,33 @@
+{
+  "lookback_days": 14,
+  "keywords": [
+    "fedora",
+    "linux",
+    "linux kernel",
+    "kernel",
+    "gnome",
+    "glibc",
+    "systemd",
+    "sudo",
+    "polkit",
+    "openssh",
+    "openssl",
+    "curl",
+    "firefox",
+    "chromium",
+    "chrome",
+    "electron",
+    "git",
+    "python",
+    "node.js",
+    "npm"
+  ],
+  "manual_cves": [
+    {
+      "id": "CVE-2026-31431",
+      "name": "Copy Fail",
+      "component": "linux kernel",
+      "source": "https://copy.fail/"
+    }
+  ]
+}
