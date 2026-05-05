@@ -240,8 +240,143 @@ list_dependency_watch_files() {
 write_trivy_dependency_report() {
   local json="$1"
   local generated
+  local trivy_jq_defs
 
   generated="$(date '+%Y-%m-%d %H:%M:%S')"
+  trivy_jq_defs='
+    def severity_rank($severity):
+      if $severity == "CRITICAL" then 0
+      elif $severity == "HIGH" then 1
+      elif $severity == "MEDIUM" then 2
+      elif $severity == "LOW" then 3
+      else 4 end;
+
+    def metric($vector; $key):
+      (($vector // "" | split("/") | map(select(startswith($key + ":"))) | first) // "" | split(":")[1]) // "";
+
+    def attack_vector_label($code):
+      if $code == "N" then "Network"
+      elif $code == "A" then "Adjacent"
+      elif $code == "L" then "Local"
+      elif $code == "P" then "Physical"
+      else "-" end;
+
+    def attack_vector_rank($code):
+      if $code == "N" then 0
+      elif $code == "A" then 1
+      elif $code == "L" then 2
+      elif $code == "P" then 3
+      else 9 end;
+
+    def complexity_label($code):
+      if $code == "L" then "Low"
+      elif $code == "M" then "Medium"
+      elif $code == "H" then "High"
+      else "-" end;
+
+    def complexity_rank($code):
+      if $code == "L" then 0
+      elif $code == "M" then 1
+      elif $code == "H" then 2
+      else 9 end;
+
+    def privilege_label($code):
+      if $code == "N" then "None"
+      elif $code == "L" then "Low"
+      elif $code == "H" then "High"
+      else "-" end;
+
+    def privilege_rank($code):
+      if $code == "N" then 0
+      elif $code == "L" then 1
+      elif $code == "H" then 2
+      else 9 end;
+
+    def authentication_label($code):
+      if $code == "N" then "Auth: None"
+      elif $code == "S" then "Auth: Single"
+      elif $code == "M" then "Auth: Multiple"
+      else "-" end;
+
+    def authentication_rank($code):
+      if $code == "N" then 0
+      elif $code == "S" then 1
+      elif $code == "M" then 2
+      else 9 end;
+
+    def interaction_label($code):
+      if $code == "N" then "None"
+      elif $code == "R" then "Required"
+      elif $code == "P" then "Passive"
+      elif $code == "A" then "Active"
+      else "-" end;
+
+    def interaction_rank($code):
+      if $code == "N" then 0
+      elif $code == "P" then 1
+      elif $code == "R" then 2
+      elif $code == "A" then 3
+      else 9 end;
+
+    def cvss_entry:
+      (.CVSS // {}
+        | to_entries
+        | map({
+            source: .key,
+            score: ((.value.V4Score // .value.V3Score // .value.V2Score // 0) | tonumber? // 0),
+            vector: (.value.V4Vector // .value.V3Vector // .value.V2Vector // "")
+          })
+        | sort_by(.score)
+        | reverse
+        | first) // {source: "", score: -1, vector: ""};
+
+    def cvss_summary:
+      cvss_entry as $cvss
+      | ($cvss.vector // "") as $vector
+      | metric($vector; "AV") as $attack_vector
+      | metric($vector; "AC") as $complexity
+      | metric($vector; "PR") as $privileges
+      | metric($vector; "Au") as $authentication
+      | metric($vector; "UI") as $interaction
+      | {
+          score: (if ($cvss.score // -1) >= 0 then ($cvss.score | tostring) else "-" end),
+          score_sort: ($cvss.score // -1),
+          vector: (if $vector != "" then $vector else "-" end),
+          attack_vector: attack_vector_label($attack_vector),
+          attack_vector_rank: attack_vector_rank($attack_vector),
+          attack_complexity: complexity_label($complexity),
+          attack_complexity_rank: complexity_rank($complexity),
+          privileges: (if $privileges != "" then privilege_label($privileges) else authentication_label($authentication) end),
+          privileges_rank: (if $privileges != "" then privilege_rank($privileges) else authentication_rank($authentication) end),
+          user_interaction: interaction_label($interaction),
+          user_interaction_rank: interaction_rank($interaction)
+        };
+
+    def finding($target):
+      cvss_summary as $cvss
+      | {
+          rank: severity_rank(.Severity),
+          severity: .Severity,
+          package: .PkgName,
+          installed: (.InstalledVersion // "-"),
+          fixed: (.FixedVersion // "-"),
+          target: $target,
+          id: .VulnerabilityID,
+          url: (.PrimaryURL // ""),
+          title: ((.Title // .Description // "") | gsub("[\t\r\n]+"; " ")),
+          cvss_score: $cvss.score,
+          cvss_score_sort: $cvss.score_sort,
+          cvss_vector: $cvss.vector,
+          attack_vector: $cvss.attack_vector,
+          attack_vector_rank: $cvss.attack_vector_rank,
+          attack_complexity: $cvss.attack_complexity,
+          attack_complexity_rank: $cvss.attack_complexity_rank,
+          privileges: $cvss.privileges,
+          privileges_rank: $cvss.privileges_rank,
+          user_interaction: $cvss.user_interaction,
+          user_interaction_rank: $cvss.user_interaction_rank
+        };
+  '
 
   {
     printf 'Security dependency report\n'
@@ -258,82 +393,48 @@ write_trivy_dependency_report() {
     printf 'Recent high/critical changes (%s days): %s\n' "$RECENT_DAYS" "$DEP_RECENT_COUNT"
     printf '\n'
     printf 'Recent important changes\n'
-    printf '#\tSeverity\tChanged\tPackage\tInstalled\tFixed\tTarget\tVulnerability\tTitle\n'
+    printf '#\tSeverity\tChanged\tCVSS\tAttack vector\tComplexity\tPrivileges\tUser action\tPackage\tInstalled\tFixed\tTarget\tVulnerability\tTitle\n'
     printf '%s\n' "$json" |
-      jq -r --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '
+      jq -r --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" "${trivy_jq_defs}"'
         [.Results[]?
           | .Target as $target
           | .Vulnerabilities[]?
           | select(.Severity == "CRITICAL" or .Severity == "HIGH")
           | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)
-          | {
-              rank: (if .Severity == "CRITICAL" then 0 else 1 end),
-              changed: ((.LastModifiedDate // .PublishedDate // "-")[0:10]),
-              severity: .Severity,
-              package: .PkgName,
-              installed: (.InstalledVersion // "-"),
-              fixed: (.FixedVersion // "-"),
-              target: $target,
-              id: .VulnerabilityID,
-              title: ((.Title // .Description // "") | gsub("[\t\r\n]+"; " ") | .[0:160])
-            }]
+          | finding($target) + {changed: ((.LastModifiedDate // .PublishedDate // "-")[0:10])}]
         | sort_by(.changed, .rank, .package, .id)
         | reverse
         | to_entries[]
-        | [(.key + 1), .value.severity, .value.changed, .value.package, .value.installed, .value.fixed, .value.target, .value.id, .value.title]
+        | [(.key + 1), .value.severity, .value.changed, .value.cvss_score, .value.attack_vector, .value.attack_complexity, .value.privileges, .value.user_interaction, .value.package, .value.installed, .value.fixed, .value.target, .value.id, (.value.title | .[0:160])]
         | @tsv
       ' 2>/dev/null
     printf '\n'
     printf 'Important findings\n'
-    printf '#\tSeverity\tPackage\tInstalled\tFixed\tTarget\tVulnerability\tTitle\n'
+    printf '#\tSeverity\tCVSS\tAttack vector\tComplexity\tPrivileges\tUser action\tPackage\tInstalled\tFixed\tTarget\tVulnerability\tTitle\n'
     printf '%s\n' "$json" |
-      jq -r '
+      jq -r "${trivy_jq_defs}"'
         [.Results[]?
           | .Target as $target
           | .Vulnerabilities[]?
           | select(.Severity == "CRITICAL" or .Severity == "HIGH")
-          | {
-              rank: (if .Severity == "CRITICAL" then 0 else 1 end),
-              severity: .Severity,
-              package: .PkgName,
-              installed: (.InstalledVersion // "-"),
-              fixed: (.FixedVersion // "-"),
-              target: $target,
-              id: .VulnerabilityID,
-              title: ((.Title // .Description // "") | gsub("[\t\r\n]+"; " ") | .[0:160])
-            }]
+          | finding($target)]
         | sort_by(.rank, .package, .id)
         | to_entries[]
-        | [(.key + 1), .value.severity, .value.package, .value.installed, .value.fixed, .value.target, .value.id, .value.title]
+        | [(.key + 1), .value.severity, .value.cvss_score, .value.attack_vector, .value.attack_complexity, .value.privileges, .value.user_interaction, .value.package, .value.installed, .value.fixed, .value.target, .value.id, (.value.title | .[0:160])]
         | @tsv
       ' 2>/dev/null
     printf '\n'
     printf 'All findings\n'
-    printf '#\tSeverity\tPackage\tInstalled\tFixed\tTarget\tVulnerability\tTitle\n'
+    printf '#\tSeverity\tCVSS\tAttack vector\tComplexity\tPrivileges\tUser action\tPackage\tInstalled\tFixed\tTarget\tVulnerability\tTitle\n'
     printf '%s\n' "$json" |
-      jq -r '
-        def rank($severity):
-          if $severity == "CRITICAL" then 0
-          elif $severity == "HIGH" then 1
-          elif $severity == "MEDIUM" then 2
-          elif $severity == "LOW" then 3
-          else 4 end;
+      jq -r "${trivy_jq_defs}"'
         [.Results[]?
           | .Target as $target
           | .Vulnerabilities[]?
-          | {
-              rank: rank(.Severity),
-              severity: .Severity,
-              package: .PkgName,
-              installed: (.InstalledVersion // "-"),
-              fixed: (.FixedVersion // "-"),
-              target: $target,
-              id: .VulnerabilityID,
-              title: ((.Title // .Description // "") | gsub("[\t\r\n]+"; " ") | .[0:160])
-            }]
+          | finding($target)]
         | sort_by(.rank, .package, .id)
         | to_entries[]
-        | [(.key + 1), .value.severity, .value.package, .value.installed, .value.fixed, .value.target, .value.id, .value.title]
+        | [(.key + 1), .value.severity, .value.cvss_score, .value.attack_vector, .value.attack_complexity, .value.privileges, .value.user_interaction, .value.package, .value.installed, .value.fixed, .value.target, .value.id, (.value.title | .[0:160])]
         | @tsv
       ' 2>/dev/null
   } > "$DEP_REPORT_FILE"
@@ -347,10 +448,10 @@ write_trivy_dependency_report() {
     printf '%s\n' 'h1{font-size:22px;margin:0 0 8px;} h2{font-size:18px;margin-top:28px;}'
     printf '%s\n' '.meta{color:#5f6368;margin-bottom:18px;} .summary{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0;}'
     printf '%s\n' '.pill{border:1px solid #dadce0;border-radius:6px;padding:6px 10px;background:#f8f9fa;}'
-    printf '%s\n' 'table{border-collapse:collapse;width:100%;table-layout:fixed;} th,td{border-bottom:1px solid #e0e0e0;padding:6px 8px;text-align:left;vertical-align:top;}'
-    printf '%s\n' 'th{position:sticky;top:0;background:#f8f9fa;z-index:1;} td{word-break:break-word;} .num{width:48px;color:#5f6368;text-align:right;}'
+    printf '%s\n' '.table-wrap{overflow-x:auto;margin-bottom:8px;} table{border-collapse:collapse;width:100%;min-width:1620px;table-layout:fixed;} th,td{border-bottom:1px solid #e0e0e0;padding:6px 8px;text-align:left;vertical-align:top;}'
+    printf '%s\n' 'th{position:sticky;top:0;background:#f8f9fa;z-index:1;} th[data-sort]{cursor:pointer;user-select:none;} th[aria-sort="ascending"]::after{content:" ^";color:#5f6368;} th[aria-sort="descending"]::after{content:" v";color:#5f6368;} td{word-break:break-word;} .num{width:48px;color:#5f6368;text-align:right;}'
     printf '%s\n' '.sev-CRITICAL{color:#b00020;font-weight:700;} .sev-HIGH{color:#d84315;font-weight:700;}'
-    printf '%s\n' '.fixed{width:130px}.version{width:110px}.date{width:100px}.vuln{width:150px}.severity{width:90px}.target{width:260px}.package{width:150px}'
+    printf '%s\n' '.fixed{width:120px}.version{width:100px}.date{width:100px}.vuln{width:145px}.severity{width:90px}.score{width:70px}.attack{width:110px}.complexity{width:95px}.privileges{width:105px}.interaction{width:105px}.target{width:230px}.package{width:145px}'
     printf '%s\n' '</style></head><body>'
     printf '<h1>%s</h1>\n' 'Security Dependency Report'
     printf '<div class="meta">Generated: %s<br>Projects: %s<br>Scanner: trivy</div>\n' "$generated" "$PROJECTS_DIR"
@@ -363,88 +464,93 @@ write_trivy_dependency_report() {
     printf '<div class="pill">Recent high/critical changes: %s</div>\n' "$DEP_RECENT_COUNT"
     printf '%s\n' '</div>'
     printf '%s\n' '<h2>Recent Important Changes</h2>'
-    printf '%s\n' '<table><thead><tr><th class="num">#</th><th class="severity">Severity</th><th class="date">Changed</th><th class="package">Package</th><th class="version">Installed</th><th class="fixed">Fixed</th><th class="target">Target</th><th class="vuln">Vulnerability</th><th>Title</th></tr></thead><tbody>'
+    printf '%s\n' '<div class="table-wrap"><table class="sortable"><thead><tr><th class="num" data-sort="number">#</th><th class="severity" data-sort="number">Severity</th><th class="date" data-sort="text">Changed</th><th class="score" data-sort="number">CVSS</th><th class="attack" data-sort="number">Attack vector</th><th class="complexity" data-sort="number">Complexity</th><th class="privileges" data-sort="number">Privileges</th><th class="interaction" data-sort="number">User action</th><th class="package" data-sort="text">Package</th><th class="version" data-sort="text">Installed</th><th class="fixed" data-sort="text">Fixed</th><th class="target" data-sort="text">Target</th><th class="vuln" data-sort="text">Vulnerability</th><th data-sort="text">Title</th></tr></thead><tbody>'
     printf '%s\n' "$json" |
-      jq -r --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '
+      jq -r --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" "${trivy_jq_defs}"'
         def esc: tostring | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\""; "&quot;");
         [.Results[]?
           | .Target as $target
           | .Vulnerabilities[]?
           | select(.Severity == "CRITICAL" or .Severity == "HIGH")
           | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)
-          | {
-              rank: (if .Severity == "CRITICAL" then 0 else 1 end),
-              changed: ((.LastModifiedDate // .PublishedDate // "-")[0:10]),
-              severity: .Severity,
-              package: .PkgName,
-              installed: (.InstalledVersion // "-"),
-              fixed: (.FixedVersion // "-"),
-              target: $target,
-              id: .VulnerabilityID,
-              url: (.PrimaryURL // ""),
-              title: ((.Title // .Description // "") | gsub("[\t\r\n]+"; " "))
-            }]
+          | finding($target) + {changed: ((.LastModifiedDate // .PublishedDate // "-")[0:10])}]
         | sort_by(.changed, .rank, .package, .id)
         | reverse
         | to_entries[]
-        | "<tr><td class=\"num\">\(.key + 1)</td><td class=\"sev-\(.value.severity)\">\(.value.severity | esc)</td><td>\(.value.changed | esc)</td><td>\(.value.package | esc)</td><td>\(.value.installed | esc)</td><td>\(.value.fixed | esc)</td><td>\(.value.target | esc)</td><td><a href=\"\(.value.url | esc)\">\(.value.id | esc)</a></td><td>\(.value.title | esc)</td></tr>"
+        | "<tr><td class=\"num\" data-sort-value=\"\(.key + 1)\">\(.key + 1)</td><td class=\"sev-\(.value.severity)\" data-sort-value=\"\(.value.rank)\">\(.value.severity | esc)</td><td class=\"date\" data-sort-value=\"\(.value.changed | esc)\">\(.value.changed | esc)</td><td class=\"score\" data-sort-value=\"\(.value.cvss_score_sort)\"><span title=\"\(.value.cvss_vector | esc)\">\(.value.cvss_score | esc)</span></td><td class=\"attack\" data-sort-value=\"\(.value.attack_vector_rank)\">\(.value.attack_vector | esc)</td><td class=\"complexity\" data-sort-value=\"\(.value.attack_complexity_rank)\">\(.value.attack_complexity | esc)</td><td class=\"privileges\" data-sort-value=\"\(.value.privileges_rank)\">\(.value.privileges | esc)</td><td class=\"interaction\" data-sort-value=\"\(.value.user_interaction_rank)\">\(.value.user_interaction | esc)</td><td>\(.value.package | esc)</td><td>\(.value.installed | esc)</td><td>\(.value.fixed | esc)</td><td>\(.value.target | esc)</td><td><a href=\"\(.value.url | esc)\">\(.value.id | esc)</a></td><td>\(.value.title | esc)</td></tr>"
       ' 2>/dev/null
-    printf '%s\n' '</tbody></table>'
+    printf '%s\n' '</tbody></table></div>'
     printf '%s\n' '<h2>Important Findings</h2>'
-    printf '%s\n' '<table><thead><tr><th class="num">#</th><th class="severity">Severity</th><th class="package">Package</th><th class="version">Installed</th><th class="fixed">Fixed</th><th class="target">Target</th><th class="vuln">Vulnerability</th><th>Title</th></tr></thead><tbody>'
+    printf '%s\n' '<div class="table-wrap"><table class="sortable"><thead><tr><th class="num" data-sort="number">#</th><th class="severity" data-sort="number">Severity</th><th class="score" data-sort="number">CVSS</th><th class="attack" data-sort="number">Attack vector</th><th class="complexity" data-sort="number">Complexity</th><th class="privileges" data-sort="number">Privileges</th><th class="interaction" data-sort="number">User action</th><th class="package" data-sort="text">Package</th><th class="version" data-sort="text">Installed</th><th class="fixed" data-sort="text">Fixed</th><th class="target" data-sort="text">Target</th><th class="vuln" data-sort="text">Vulnerability</th><th data-sort="text">Title</th></tr></thead><tbody>'
     printf '%s\n' "$json" |
-      jq -r '
+      jq -r "${trivy_jq_defs}"'
         def esc: tostring | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\""; "&quot;");
         [.Results[]?
           | .Target as $target
           | .Vulnerabilities[]?
           | select(.Severity == "CRITICAL" or .Severity == "HIGH")
-          | {
-              rank: (if .Severity == "CRITICAL" then 0 else 1 end),
-              severity: .Severity,
-              package: .PkgName,
-              installed: (.InstalledVersion // "-"),
-              fixed: (.FixedVersion // "-"),
-              target: $target,
-              id: .VulnerabilityID,
-              url: (.PrimaryURL // ""),
-              title: ((.Title // .Description // "") | gsub("[\t\r\n]+"; " "))
-            }]
+          | finding($target)]
         | sort_by(.rank, .package, .id)
         | to_entries[]
-        | "<tr><td class=\"num\">\(.key + 1)</td><td class=\"sev-\(.value.severity)\">\(.value.severity | esc)</td><td>\(.value.package | esc)</td><td>\(.value.installed | esc)</td><td>\(.value.fixed | esc)</td><td>\(.value.target | esc)</td><td><a href=\"\(.value.url | esc)\">\(.value.id | esc)</a></td><td>\(.value.title | esc)</td></tr>"
+        | "<tr><td class=\"num\" data-sort-value=\"\(.key + 1)\">\(.key + 1)</td><td class=\"sev-\(.value.severity)\" data-sort-value=\"\(.value.rank)\">\(.value.severity | esc)</td><td class=\"score\" data-sort-value=\"\(.value.cvss_score_sort)\"><span title=\"\(.value.cvss_vector | esc)\">\(.value.cvss_score | esc)</span></td><td class=\"attack\" data-sort-value=\"\(.value.attack_vector_rank)\">\(.value.attack_vector | esc)</td><td class=\"complexity\" data-sort-value=\"\(.value.attack_complexity_rank)\">\(.value.attack_complexity | esc)</td><td class=\"privileges\" data-sort-value=\"\(.value.privileges_rank)\">\(.value.privileges | esc)</td><td class=\"interaction\" data-sort-value=\"\(.value.user_interaction_rank)\">\(.value.user_interaction | esc)</td><td>\(.value.package | esc)</td><td>\(.value.installed | esc)</td><td>\(.value.fixed | esc)</td><td>\(.value.target | esc)</td><td><a href=\"\(.value.url | esc)\">\(.value.id | esc)</a></td><td>\(.value.title | esc)</td></tr>"
       ' 2>/dev/null
-    printf '%s\n' '</tbody></table>'
+    printf '%s\n' '</tbody></table></div>'
     printf '%s\n' '<h2>All Findings</h2>'
-    printf '%s\n' '<table><thead><tr><th class="num">#</th><th class="severity">Severity</th><th class="package">Package</th><th class="version">Installed</th><th class="fixed">Fixed</th><th class="target">Target</th><th class="vuln">Vulnerability</th><th>Title</th></tr></thead><tbody>'
+    printf '%s\n' '<div class="table-wrap"><table class="sortable"><thead><tr><th class="num" data-sort="number">#</th><th class="severity" data-sort="number">Severity</th><th class="score" data-sort="number">CVSS</th><th class="attack" data-sort="number">Attack vector</th><th class="complexity" data-sort="number">Complexity</th><th class="privileges" data-sort="number">Privileges</th><th class="interaction" data-sort="number">User action</th><th class="package" data-sort="text">Package</th><th class="version" data-sort="text">Installed</th><th class="fixed" data-sort="text">Fixed</th><th class="target" data-sort="text">Target</th><th class="vuln" data-sort="text">Vulnerability</th><th data-sort="text">Title</th></tr></thead><tbody>'
     printf '%s\n' "$json" |
-      jq -r '
+      jq -r "${trivy_jq_defs}"'
         def esc: tostring | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\""; "&quot;");
-        def rank($severity):
-          if $severity == "CRITICAL" then 0
-          elif $severity == "HIGH" then 1
-          elif $severity == "MEDIUM" then 2
-          elif $severity == "LOW" then 3
-          else 4 end;
         [.Results[]?
           | .Target as $target
           | .Vulnerabilities[]?
-          | {
-              rank: rank(.Severity),
-              severity: .Severity,
-              package: .PkgName,
-              installed: (.InstalledVersion // "-"),
-              fixed: (.FixedVersion // "-"),
-              target: $target,
-              id: .VulnerabilityID,
-              url: (.PrimaryURL // ""),
-              title: ((.Title // .Description // "") | gsub("[\t\r\n]+"; " "))
-            }]
+          | finding($target)]
         | sort_by(.rank, .package, .id)
         | to_entries[]
-        | "<tr><td class=\"num\">\(.key + 1)</td><td class=\"sev-\(.value.severity)\">\(.value.severity | esc)</td><td>\(.value.package | esc)</td><td>\(.value.installed | esc)</td><td>\(.value.fixed | esc)</td><td>\(.value.target | esc)</td><td><a href=\"\(.value.url | esc)\">\(.value.id | esc)</a></td><td>\(.value.title | esc)</td></tr>"
+        | "<tr><td class=\"num\" data-sort-value=\"\(.key + 1)\">\(.key + 1)</td><td class=\"sev-\(.value.severity)\" data-sort-value=\"\(.value.rank)\">\(.value.severity | esc)</td><td class=\"score\" data-sort-value=\"\(.value.cvss_score_sort)\"><span title=\"\(.value.cvss_vector | esc)\">\(.value.cvss_score | esc)</span></td><td class=\"attack\" data-sort-value=\"\(.value.attack_vector_rank)\">\(.value.attack_vector | esc)</td><td class=\"complexity\" data-sort-value=\"\(.value.attack_complexity_rank)\">\(.value.attack_complexity | esc)</td><td class=\"privileges\" data-sort-value=\"\(.value.privileges_rank)\">\(.value.privileges | esc)</td><td class=\"interaction\" data-sort-value=\"\(.value.user_interaction_rank)\">\(.value.user_interaction | esc)</td><td>\(.value.package | esc)</td><td>\(.value.installed | esc)</td><td>\(.value.fixed | esc)</td><td>\(.value.target | esc)</td><td><a href=\"\(.value.url | esc)\">\(.value.id | esc)</a></td><td>\(.value.title | esc)</td></tr>"
       ' 2>/dev/null
-    printf '%s\n' '</tbody></table></body></html>'
+    printf '%s\n' '</tbody></table></div>'
+    printf '%s\n' '<script>'
+    printf '%s\n' '(() => {'
+    printf '%s\n' '  const cellValue = (row, index) => row.children[index]?.dataset.sortValue ?? row.children[index]?.textContent.trim() ?? "";'
+    printf '%s\n' '  const coerce = (value, type) => {'
+    printf '%s\n' '    if (type === "number") {'
+    printf '%s\n' '      const number = Number.parseFloat(value);'
+    printf '%s\n' '      return Number.isNaN(number) ? -1 : number;'
+    printf '%s\n' '    }'
+    printf '%s\n' '    return value.toLocaleLowerCase();'
+    printf '%s\n' '  };'
+    printf '%s\n' '  document.querySelectorAll("table.sortable").forEach(table => {'
+    printf '%s\n' '    table.querySelectorAll("th[data-sort]").forEach((th, index) => {'
+    printf '%s\n' '      th.tabIndex = 0;'
+    printf '%s\n' '      const sort = () => {'
+    printf '%s\n' '        const tbody = table.tBodies[0];'
+    printf '%s\n' '        const direction = th.dataset.direction === "asc" ? "desc" : "asc";'
+    printf '%s\n' '        const multiplier = direction === "asc" ? 1 : -1;'
+    printf '%s\n' '        const type = th.dataset.sort || "text";'
+    printf '%s\n' '        const rows = Array.from(tbody.rows);'
+    printf '%s\n' '        rows.sort((left, right) => {'
+    printf '%s\n' '          const a = coerce(cellValue(left, index), type);'
+    printf '%s\n' '          const b = coerce(cellValue(right, index), type);'
+    printf '%s\n' '          if (a < b) return -1 * multiplier;'
+    printf '%s\n' '          if (a > b) return 1 * multiplier;'
+    printf '%s\n' '          return 0;'
+    printf '%s\n' '        });'
+    printf '%s\n' '        rows.forEach(row => tbody.appendChild(row));'
+    printf '%s\n' '        table.querySelectorAll("th[aria-sort]").forEach(header => header.removeAttribute("aria-sort"));'
+    printf '%s\n' '        th.dataset.direction = direction;'
+    printf '%s\n' '        th.setAttribute("aria-sort", direction === "asc" ? "ascending" : "descending");'
+    printf '%s\n' '      };'
+    printf '%s\n' '      th.addEventListener("click", sort);'
+    printf '%s\n' '      th.addEventListener("keydown", event => {'
+    printf '%s\n' '        if (event.key === "Enter" || event.key === " ") {'
+    printf '%s\n' '          event.preventDefault();'
+    printf '%s\n' '          sort();'
+    printf '%s\n' '        }'
+    printf '%s\n' '      });'
+    printf '%s\n' '    });'
+    printf '%s\n' '  });'
+    printf '%s\n' '})();'
+    printf '%s\n' '</script></body></html>'
   } > "$DEP_HTML_REPORT_FILE"
 }
 

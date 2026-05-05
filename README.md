@@ -79,6 +79,10 @@ Generated reports are written to:
 ~/.cache/sec-watch/dependency-report.json
 ```
 
+Trivy reports include CVSS score, attack vector, attack complexity, privileges,
+and user interaction columns. The HTML tables can be sorted by clicking the
+column headers.
+
 They are not tracked by git.
 
 Sanitized example reports are tracked for reference:
