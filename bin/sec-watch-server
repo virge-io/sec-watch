@@ -1,0 +1,661 @@
+#!/usr/bin/env python3
+
+import argparse
+import hashlib
+import hmac
+import html as html_lib
+import importlib
+import ipaddress
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse
+
+
+BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
+SCP_LIKE_RE = re.compile(r"^[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:.+")
+SUPPORTED_URL_SCHEMES = {"http", "https", "ssh", "git"}
+TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+class CommandError(RuntimeError):
+    pass
+
+
+class InputError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class Settings:
+    host: str
+    port: int
+    token: str
+    cache_root: Path
+    scanner: Path
+    workers: int
+    git_timeout: int
+    scan_timeout: int
+
+    @property
+    def repos_dir(self) -> Path:
+        return self.cache_root / "repos"
+
+    @property
+    def jobs_dir(self) -> Path:
+        return self.cache_root / "jobs"
+
+
+@dataclass
+class ScanJob:
+    id: str
+    source_type: str
+    source: str
+    source_display: str
+    branch: str
+    force: bool
+    status: str = "queued"
+    created_at: str = field(default_factory=lambda: utc_now())
+    updated_at: str = field(default_factory=lambda: utc_now())
+    worktree: str = ""
+    summary: str = ""
+    scanner: str = ""
+    report_path: str = ""
+    text_report_path: str = ""
+    json_report_path: str = ""
+    exit_code: int | None = None
+    error: str = ""
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def default_cache_root() -> Path:
+    cache_home = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return cache_home / "sec-watch-web"
+
+
+def script_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def is_loopback_host(host: str | None) -> bool:
+    if not host:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if address.version == 6 and address.ipv4_mapped:
+        return address.ipv4_mapped.is_loopback
+    return address.is_loopback
+
+
+def host_requires_token(host: str) -> bool:
+    if host in {"0.0.0.0", "::", ""}:
+        return True
+    return not is_loopback_host(host)
+
+
+def tail(text: str, limit: int = 4000) -> str:
+    return text[-limit:] if len(text) > limit else text
+
+
+def git_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+    return env
+
+
+def run_command(args: list[str], *, timeout: int, env: dict[str, str] | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            args,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise CommandError(f"Command timed out after {timeout}s: {args[0]}") from error
+    except OSError as error:
+        raise CommandError(str(error)) from error
+
+    if check and result.returncode != 0:
+        message = tail(result.stderr.strip() or result.stdout.strip() or f"{args[0]} exited {result.returncode}")
+        raise CommandError(message)
+    return result
+
+
+def validate_branch(branch: str) -> str:
+    branch = branch.strip()
+    if not branch:
+        raise InputError("Branch is required.")
+    if not BRANCH_RE.match(branch):
+        raise InputError("Branch contains unsupported characters.")
+    if ".." in branch or "//" in branch or branch.endswith("/") or branch.endswith(".lock") or "@{" in branch:
+        raise InputError("Branch is not a supported Git branch name.")
+    return branch
+
+
+def is_supported_git_url(value: str) -> bool:
+    if SCP_LIKE_RE.match(value):
+        return True
+    parsed = urlparse(value)
+    return parsed.scheme in SUPPORTED_URL_SCHEMES and bool(parsed.netloc)
+
+
+def redact_url(value: str) -> str:
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.netloc and ("@" in parsed.netloc):
+        host = parsed.netloc.rsplit("@", 1)[1]
+        return parsed._replace(netloc=f"***@{host}").geturl()
+    return value
+
+
+def validate_local_repo(path_value: str, settings: Settings) -> Path:
+    if not path_value.strip():
+        raise InputError("Local path is required.")
+
+    path = Path(path_value).expanduser()
+    if not path.exists() or not path.is_dir():
+        raise InputError("Local path must be an existing directory.")
+
+    result = run_command(
+        ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+        timeout=settings.git_timeout,
+        env=git_env(),
+        check=False,
+    )
+    if result.returncode != 0:
+        raise InputError("Local path must be inside a Git repository.")
+
+    return Path(result.stdout.strip()).resolve()
+
+
+def validate_scan_request(data: dict[str, str], settings: Settings) -> dict[str, Any]:
+    source_type = data.get("source_type", "git_url").strip()
+    if source_type not in {"git_url", "local_path"}:
+        raise InputError("Source type must be git_url or local_path.")
+
+    source = (data.get("source") or data.get("repo") or data.get("repo_url") or data.get("local_path") or "").strip()
+    branch = validate_branch(data.get("branch", "main"))
+    force = str(data.get("force", "")).lower() in TRUE_VALUES
+
+    if source_type == "git_url":
+        if not source:
+            raise InputError("Git URL is required.")
+        if not is_supported_git_url(source):
+            raise InputError("Git URL must use http, https, ssh, git, or git@host:path syntax.")
+        source_display = redact_url(source)
+    else:
+        source_path = validate_local_repo(source, settings)
+        source = str(source_path)
+        source_display = source
+
+    return {
+        "source_type": source_type,
+        "source": source,
+        "source_display": source_display,
+        "branch": branch,
+        "force": force,
+    }
+
+
+def source_cache_key(source_type: str, source: str) -> str:
+    digest = hashlib.sha256(f"{source_type}:{source}".encode("utf-8")).hexdigest()
+    return digest[:24]
+
+
+def ensure_mirror(settings: Settings, repo_lock: threading.Lock, source_type: str, source: str, branch: str, force: bool) -> Path:
+    mirror_dir = settings.repos_dir / f"{source_cache_key(source_type, source)}.git"
+    source_arg = source
+
+    with repo_lock:
+        if not mirror_dir.exists():
+            run_command(
+                ["git", "clone", "--mirror", source_arg, str(mirror_dir)],
+                timeout=settings.git_timeout,
+                env=git_env(),
+            )
+        elif force:
+            run_command(["git", "-C", str(mirror_dir), "remote", "set-url", "origin", source_arg], timeout=settings.git_timeout, env=git_env())
+            run_command(["git", "-C", str(mirror_dir), "remote", "update", "--prune"], timeout=settings.git_timeout, env=git_env())
+
+        if not mirror_has_branch(settings, mirror_dir, branch):
+            run_command(["git", "-C", str(mirror_dir), "remote", "set-url", "origin", source_arg], timeout=settings.git_timeout, env=git_env())
+            run_command(["git", "-C", str(mirror_dir), "remote", "update", "--prune"], timeout=settings.git_timeout, env=git_env())
+            if not mirror_has_branch(settings, mirror_dir, branch):
+                raise InputError(f"Branch not found: {branch}")
+
+    return mirror_dir
+
+
+def mirror_has_branch(settings: Settings, mirror_dir: Path, branch: str) -> bool:
+    result = run_command(
+        ["git", "-C", str(mirror_dir), "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        timeout=settings.git_timeout,
+        env=git_env(),
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def checkout_worktree(settings: Settings, mirror_dir: Path, branch: str, worktree_dir: Path) -> None:
+    if worktree_dir.exists():
+        shutil.rmtree(worktree_dir)
+
+    run_command(
+        ["git", "clone", "--no-checkout", str(mirror_dir), str(worktree_dir)],
+        timeout=settings.git_timeout,
+        env=git_env(),
+    )
+    run_command(
+        ["git", "-C", str(worktree_dir), "fetch", "origin", f"refs/heads/{branch}:refs/remotes/origin/{branch}"],
+        timeout=settings.git_timeout,
+        env=git_env(),
+    )
+    run_command(
+        ["git", "-C", str(worktree_dir), "checkout", "--detach", f"refs/remotes/origin/{branch}"],
+        timeout=settings.git_timeout,
+        env=git_env(),
+    )
+
+
+def parse_status(stdout: str) -> dict[str, str]:
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    status: dict[str, str] = {"summary": lines[0] if lines else ""}
+    for line in lines[1:]:
+        key, separator, value = line.partition("=")
+        if separator:
+            status[key] = value
+    return status
+
+
+def run_scanner(settings: Settings, worktree_dir: Path, job_cache_dir: Path, force: bool) -> subprocess.CompletedProcess[str]:
+    if not settings.scanner.exists():
+        raise CommandError(f"Scanner not found: {settings.scanner}")
+
+    env = os.environ.copy()
+    env["XDG_CACHE_HOME"] = str(job_cache_dir)
+    env["SEC_WATCH_PROJECTS_DIR"] = str(worktree_dir)
+    env["SEC_WATCH_PROJECTS"] = ""
+    env["SEC_WATCH_OS_ADVISORIES"] = "0"
+    if force:
+        env["SEC_WATCH_FORCE"] = "1"
+
+    return run_command(
+        [str(settings.scanner), "status"],
+        timeout=settings.scan_timeout,
+        env=env,
+        check=False,
+    )
+
+
+def update_job(jobs: dict[str, ScanJob], jobs_lock: threading.Lock, job_id: str, **fields: Any) -> None:
+    with jobs_lock:
+        job = jobs[job_id]
+        for key, value in fields.items():
+            setattr(job, key, value)
+        job.updated_at = utc_now()
+
+
+def get_job(jobs: dict[str, ScanJob], jobs_lock: threading.Lock, job_id: str) -> ScanJob | None:
+    with jobs_lock:
+        return jobs.get(job_id)
+
+
+def public_job(job: ScanJob) -> dict[str, Any]:
+    data = asdict(job)
+    data["source"] = job.source_display
+    data.pop("source_display", None)
+    return data
+
+
+def run_scan_job(settings: Settings, jobs: dict[str, ScanJob], jobs_lock: threading.Lock, repo_lock: threading.Lock, job_id: str) -> None:
+    job = get_job(jobs, jobs_lock, job_id)
+    if job is None:
+        return
+
+    update_job(jobs, jobs_lock, job_id, status="running")
+    job_dir = settings.jobs_dir / job_id
+    worktree_dir = job_dir / "worktree"
+    job_cache_dir = job_dir / "cache"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    job_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        mirror_dir = ensure_mirror(settings, repo_lock, job.source_type, job.source, job.branch, job.force)
+        checkout_worktree(settings, mirror_dir, job.branch, worktree_dir)
+        update_job(jobs, jobs_lock, job_id, worktree=str(worktree_dir))
+
+        result = run_scanner(settings, worktree_dir, job_cache_dir, job.force)
+        status = parse_status(result.stdout)
+        fields = {
+            "exit_code": result.returncode,
+            "stdout_tail": tail(result.stdout),
+            "stderr_tail": tail(result.stderr),
+            "summary": status.get("summary", ""),
+            "scanner": status.get("scanner", ""),
+            "report_path": status.get("dependency_html_report", ""),
+            "text_report_path": status.get("dependency_report", ""),
+            "json_report_path": str(job_cache_dir / "sec-watch" / "dependency-report.json"),
+        }
+        if result.returncode == 0:
+            update_job(jobs, jobs_lock, job_id, status="done", **fields)
+        else:
+            update_job(jobs, jobs_lock, job_id, status="failed", error=tail(result.stderr or result.stdout), **fields)
+    except (InputError, CommandError) as error:
+        update_job(jobs, jobs_lock, job_id, status="failed", error=str(error))
+    except Exception as error:
+        update_job(jobs, jobs_lock, job_id, status="failed", error=f"{type(error).__name__}: {error}")
+
+
+def html_escape(value: Any) -> str:
+    return html_lib.escape(str(value), quote=True)
+
+
+def token_query(settings: Settings, token: str | None) -> str:
+    if token and settings.token and hmac.compare_digest(token, settings.token):
+        return "?" + urlencode({"token": token})
+    return ""
+
+
+def render_page(title: str, body: str) -> str:
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html_escape(title)}</title>
+<style>
+:root{{color-scheme:light dark;}}
+body{{font:14px system-ui,sans-serif;margin:0;background:#f6f7f9;color:#202124;}}
+main{{max-width:1080px;margin:0 auto;padding:24px;}}
+h1{{font-size:22px;margin:0 0 18px;}}
+h2{{font-size:16px;margin:28px 0 10px;}}
+form,.panel{{background:#fff;border:1px solid #d8dee4;border-radius:8px;padding:16px;}}
+label{{display:block;font-weight:600;margin:0 0 6px;}}
+input,select{{box-sizing:border-box;width:100%;font:inherit;padding:8px;border:1px solid #b9c0c8;border-radius:6px;background:#fff;color:#202124;}}
+.grid{{display:grid;grid-template-columns:180px 1fr 180px;gap:12px;align-items:end;}}
+.actions{{display:flex;gap:10px;align-items:center;margin-top:14px;}}
+.check{{display:flex;gap:8px;align-items:center;font-weight:400;}}
+.check input{{width:auto;}}
+button,.button{{font:inherit;border:1px solid #2f6feb;border-radius:6px;background:#2f6feb;color:#fff;padding:8px 12px;text-decoration:none;cursor:pointer;}}
+table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid #d8dee4;border-radius:8px;overflow:hidden;}}
+th,td{{border-bottom:1px solid #d8dee4;padding:8px;text-align:left;vertical-align:top;}}
+th{{background:#eef2f7;font-weight:700;}}
+tr:last-child td{{border-bottom:0;}}
+.muted{{color:#5f6368;}}
+.status-done{{color:#137333;font-weight:700;}}
+.status-failed{{color:#b3261e;font-weight:700;}}
+.status-running,.status-queued{{color:#8a5a00;font-weight:700;}}
+.error{{white-space:pre-wrap;color:#b3261e;}}
+@media (max-width:760px){{main{{padding:16px;}}.grid{{grid-template-columns:1fr;}}table{{display:block;overflow-x:auto;}}}}
+</style>
+</head>
+<body><main>{body}</main></body>
+</html>"""
+
+
+def render_home(settings: Settings, jobs: dict[str, ScanJob], jobs_lock: threading.Lock, query: str) -> str:
+    with jobs_lock:
+        recent = sorted(jobs.values(), key=lambda item: item.created_at, reverse=True)[:20]
+
+    rows = []
+    for job in recent:
+        href = f"/scans/{job.id}{query}"
+        rows.append(
+            "<tr>"
+            f"<td><a href=\"{html_escape(href)}\">{html_escape(job.id[:8])}</a></td>"
+            f"<td class=\"status-{html_escape(job.status)}\">{html_escape(job.status)}</td>"
+            f"<td>{html_escape(job.source_display)}</td>"
+            f"<td>{html_escape(job.branch)}</td>"
+            f"<td>{html_escape(job.updated_at)}</td>"
+            "</tr>"
+        )
+    recent_rows = "\n".join(rows) if rows else "<tr><td colspan=\"5\" class=\"muted\">No scans yet</td></tr>"
+
+    body = f"""
+<h1>Security Watch</h1>
+<form method="post" action="/scans{html_escape(query)}">
+  <div class="grid">
+    <div>
+      <label for="source_type">Source</label>
+      <select id="source_type" name="source_type">
+        <option value="git_url">Git URL</option>
+        <option value="local_path">Local path</option>
+      </select>
+    </div>
+    <div>
+      <label for="source">Repository</label>
+      <input id="source" name="source" required autocomplete="off">
+    </div>
+    <div>
+      <label for="branch">Branch</label>
+      <input id="branch" name="branch" value="main" required autocomplete="off">
+    </div>
+  </div>
+  <div class="actions">
+    <button type="submit">Start scan</button>
+    <label class="check"><input type="checkbox" name="force" value="1"> Force refresh</label>
+  </div>
+</form>
+<h2>Recent Scans</h2>
+<table>
+  <thead><tr><th>Scan</th><th>Status</th><th>Repository</th><th>Branch</th><th>Updated</th></tr></thead>
+  <tbody>{recent_rows}</tbody>
+</table>
+"""
+    return render_page("Security Watch", body)
+
+
+def render_scan(settings: Settings, job: ScanJob, query: str) -> str:
+    refresh = '<meta http-equiv="refresh" content="3">' if job.status in {"queued", "running"} else ""
+    report = ""
+    if job.report_path and Path(job.report_path).exists():
+        report = f'<a class="button" href="/scans/{html_escape(job.id)}/report{html_escape(query)}">Open report</a>'
+    elif job.status == "done":
+        report = '<span class="muted">No HTML report was generated.</span>'
+
+    error = f"<h2>Error</h2><div class=\"panel error\">{html_escape(job.error)}</div>" if job.error else ""
+    body = f"""
+{refresh}
+<h1>Scan {html_escape(job.id[:8])}</h1>
+<div class="panel">
+  <p><strong>Status:</strong> <span class="status-{html_escape(job.status)}">{html_escape(job.status)}</span></p>
+  <p><strong>Repository:</strong> {html_escape(job.source_display)}</p>
+  <p><strong>Branch:</strong> {html_escape(job.branch)}</p>
+  <p><strong>Summary:</strong> {html_escape(job.summary or "-")}</p>
+  <p><strong>Scanner:</strong> {html_escape(job.scanner or "-")}</p>
+  <p><strong>Updated:</strong> {html_escape(job.updated_at)}</p>
+  <div class="actions">
+    <a class="button" href="/{html_escape(query)}">Back</a>
+    {report}
+  </div>
+</div>
+{error}
+"""
+    return render_page(f"Scan {job.id[:8]}", body)
+
+
+def path_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def parse_authorization(value: str) -> str:
+    prefix = "bearer "
+    if value.lower().startswith(prefix):
+        return value[len(prefix):].strip()
+    return ""
+
+
+def create_app(settings: Settings):
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
+
+    jobs: dict[str, ScanJob] = {}
+    jobs_lock = threading.Lock()
+    repo_lock = threading.Lock()
+
+    settings.cache_root.mkdir(parents=True, exist_ok=True)
+    settings.repos_dir.mkdir(parents=True, exist_ok=True)
+    settings.jobs_dir.mkdir(parents=True, exist_ok=True)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.executor = ThreadPoolExecutor(max_workers=settings.workers)
+        yield
+        app.state.executor.shutdown(wait=False, cancel_futures=True)
+
+    app = FastAPI(title="Security Watch", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def token_auth(request: Request, call_next):
+        client_host = request.client.host if request.client else ""
+        if is_loopback_host(client_host):
+            return await call_next(request)
+
+        token = request.headers.get("x-sec-watch-token", "")
+        token = token or parse_authorization(request.headers.get("authorization", ""))
+        token = token or request.query_params.get("token", "")
+        if not settings.token or not hmac.compare_digest(token, settings.token):
+            return PlainTextResponse("Forbidden", status_code=403)
+
+        return await call_next(request)
+
+    @app.get("/", response_class=HTMLResponse)
+    async def home(request: Request):
+        query = token_query(settings, request.query_params.get("token"))
+        return render_home(settings, jobs, jobs_lock, query)
+
+    @app.post("/scans")
+    async def create_scan(request: Request):
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            payload = await request.json()
+            data = {str(key): str(value) for key, value in payload.items()}
+            wants_json = True
+        else:
+            body = (await request.body()).decode("utf-8")
+            parsed = parse_qs(body, keep_blank_values=True)
+            data = {key: values[-1] if values else "" for key, values in parsed.items()}
+            wants_json = "application/json" in request.headers.get("accept", "")
+
+        try:
+            scan = validate_scan_request(data, settings)
+        except InputError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+        job = ScanJob(id=uuid.uuid4().hex, **scan)
+        with jobs_lock:
+            jobs[job.id] = job
+
+        request.app.state.executor.submit(run_scan_job, settings, jobs, jobs_lock, repo_lock, job.id)
+
+        query = token_query(settings, request.query_params.get("token"))
+        location = f"/scans/{job.id}{query}"
+        if wants_json:
+            return JSONResponse({"id": job.id, "status": job.status, "url": location}, status_code=202)
+        return RedirectResponse(location, status_code=303)
+
+    @app.get("/scans/{job_id}", response_class=HTMLResponse)
+    async def scan_page(request: Request, job_id: str):
+        job = get_job(jobs, jobs_lock, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        query = token_query(settings, request.query_params.get("token"))
+        return render_scan(settings, job, query)
+
+    @app.get("/api/scans/{job_id}")
+    async def scan_api(job_id: str):
+        job = get_job(jobs, jobs_lock, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        return public_job(job)
+
+    @app.get("/scans/{job_id}/report")
+    async def scan_report(job_id: str):
+        job = get_job(jobs, jobs_lock, job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        if not job.report_path:
+            raise HTTPException(status_code=404, detail="Report not available")
+
+        report_path = Path(job.report_path)
+        if not path_under(report_path, settings.jobs_dir):
+            raise HTTPException(status_code=500, detail="Report path is outside the job cache")
+        if not report_path.exists():
+            raise HTTPException(status_code=404, detail="Report not found")
+
+        return FileResponse(report_path, media_type="text/html")
+
+    return app
+
+
+def parse_args(argv: list[str]) -> Settings:
+    parser = argparse.ArgumentParser(description="Run the Security Watch webserver.")
+    parser.add_argument("--host", default=os.environ.get("SEC_WATCH_WEB_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("SEC_WATCH_WEB_PORT", "8765")))
+    parser.add_argument("--cache-root", default=os.environ.get("SEC_WATCH_WEB_CACHE", str(default_cache_root())))
+    parser.add_argument("--scanner", default=os.environ.get("SEC_WATCH_SCANNER", str(script_dir() / "sec-watch")))
+    parser.add_argument("--workers", type=int, default=int(os.environ.get("SEC_WATCH_WEB_WORKERS", "1")))
+    parser.add_argument("--git-timeout", type=int, default=int(os.environ.get("SEC_WATCH_WEB_GIT_TIMEOUT", "300")))
+    parser.add_argument("--scan-timeout", type=int, default=int(os.environ.get("SEC_WATCH_WEB_SCAN_TIMEOUT", "1800")))
+    args = parser.parse_args(argv)
+
+    token = os.environ.get("SEC_WATCH_WEB_TOKEN", "")
+    if host_requires_token(args.host) and not token:
+        parser.error("SEC_WATCH_WEB_TOKEN is required when binding outside localhost")
+    if args.workers < 1:
+        parser.error("--workers must be at least 1")
+
+    return Settings(
+        host=args.host,
+        port=args.port,
+        token=token,
+        cache_root=Path(args.cache_root).expanduser().resolve(),
+        scanner=Path(args.scanner).expanduser().resolve(),
+        workers=args.workers,
+        git_timeout=args.git_timeout,
+        scan_timeout=args.scan_timeout,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    settings = parse_args(argv or sys.argv[1:])
+    try:
+        importlib.import_module("fastapi")
+        import uvicorn
+    except ImportError:
+        print("FastAPI server dependencies are missing. Install with: python3 -m pip install -r requirements.txt", file=sys.stderr)
+        return 1
+
+    uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

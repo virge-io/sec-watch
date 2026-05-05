@@ -23,6 +23,7 @@ DEP_JSON_FILE="$CACHE_DIR/dependency-report.json"
 WATCH_CONFIG="${SEC_WATCH_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sec-watch/watch.json}"
 TTL_SECONDS="${SEC_WATCH_TTL:-1800}"
 RECENT_DAYS="${SEC_WATCH_RECENT_DAYS:-7}"
+OS_ADVISORIES="${SEC_WATCH_OS_ADVISORIES:-1}"
 CISA_KEV_URL="https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 NVD_RECENT_URL="https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-recent.json.gz"
 
@@ -576,11 +577,13 @@ else
   SCANNER=none
   SUMMARY=""
 
-  if command -v dnf5 >/dev/null 2>&1; then
-    os_json="$(dnf5 advisory list --updates --security --with-cve --json 2>/dev/null || true)"
-    OS_COUNT="$(printf '%s\n' "$os_json" | jq 'length' 2>/dev/null || printf '0')"
-  elif command -v dnf >/dev/null 2>&1; then
-    OS_COUNT="$(dnf updateinfo list updates security 2>/dev/null | awk 'NF && $1 ~ /^FEDORA-/ {count++} END {print count + 0}')"
+  if [[ "$OS_ADVISORIES" != "0" ]]; then
+    if command -v dnf5 >/dev/null 2>&1; then
+      os_json="$(dnf5 advisory list --updates --security --with-cve --json 2>/dev/null || true)"
+      OS_COUNT="$(printf '%s\n' "$os_json" | jq 'length' 2>/dev/null || printf '0')"
+    elif command -v dnf >/dev/null 2>&1; then
+      OS_COUNT="$(dnf updateinfo list updates security 2>/dev/null | awk 'NF && $1 ~ /^FEDORA-/ {count++} END {print count + 0}')"
+    fi
   fi
 
   if [[ -d "$PROJECTS_DIR" ]]; then

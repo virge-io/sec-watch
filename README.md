@@ -92,6 +92,40 @@ examples/dependency-report.html
 examples/dependency-report.txt
 ```
 
+## Web Server
+
+The `sec-watch-web` branch also includes a FastAPI wrapper for scanning a Git
+repository and branch from a browser or JSON client.
+
+Install the Python server dependencies:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Run it locally:
+
+```bash
+bin/sec-watch-server
+```
+
+For LAN access, bind to a LAN address and set a token:
+
+```bash
+SEC_WATCH_WEB_TOKEN='change-me' bin/sec-watch-server --host 0.0.0.0
+```
+
+LAN clients can pass the token as `X-Sec-Watch-Token`, `Authorization: Bearer
+...`, or `?token=...`. JSON clients can start a scan with `POST /scans` and
+poll `GET /api/scans/<id>`.
+
+The server accepts Git URLs and existing local Git repository paths. It keeps
+repository mirrors and per-scan worktrees under:
+
+```text
+~/.cache/sec-watch-web
+```
+
 ## Development
 
 After changing the schema:
