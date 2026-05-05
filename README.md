@@ -104,4 +104,15 @@ gnome-extensions disable sec-watch@local
 gnome-extensions enable sec-watch@local
 ```
 
-On Wayland, logging out and back in is often the cleanest way to reload extension code.
+For extension code changes on Wayland, use a nested GNOME Shell instead of
+logging out of the real desktop:
+
+```bash
+bin/sec-watch-dev-shell
+```
+
+Wayland sessions cannot restart the logged-in GNOME Shell process. The helper
+installs the extension, starts a nested Wayland Shell, and enables the extension
+inside that nested session so each run gets a fresh extension process. On GNOME
+49 and later, Fedora may need `mutter-devel` installed for the nested
+development kit.

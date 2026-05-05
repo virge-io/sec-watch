@@ -21,10 +21,10 @@ The extension invokes `~/.local/bin/sec-watch`, which is installed by `install.s
 - Before handing off shell-script changes, run:
 
   ```bash
-  bash -n install.sh bin/sec-watch
+  bash -n install.sh bin/sec-watch bin/sec-watch-dev-shell
   ```
 
-- For a local install/reload cycle, use:
+- For a local install/reload cycle on X11, use:
 
   ```bash
   ./install.sh
@@ -32,7 +32,16 @@ The extension invokes `~/.local/bin/sec-watch`, which is installed by `install.s
   gnome-extensions enable sec-watch@local
   ```
 
-  On Wayland, a logout/login is often needed for a clean GNOME Shell reload.
+- For extension code changes on Wayland, prefer:
+
+  ```bash
+  bin/sec-watch-dev-shell
+  ```
+
+  The helper enables `sec-watch@local` inside the nested D-Bus session. GJS
+  cannot unload already-imported extension modules, and Wayland sessions cannot
+  restart the logged-in GNOME Shell process. On Fedora GNOME 49+,
+  `gnome-shell --devkit` may require the `mutter-devel` package.
 
 ## Testing Notes
 
