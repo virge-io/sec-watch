@@ -142,64 +142,6 @@ count_manual_watch_cves() {
   jq_count '.manual_cves // [] | map(select(.id // "" | length > 0)) | length' "$WATCH_CONFIG"
 }
 
-count_cisa_kev_matches() {
-  local regex lookback since data
-
-  regex="$(keywords_regex)"
-  [[ -n "$regex" ]] || {
-    printf '0'
-    return
-  }
-
-  lookback="${1:-$(jq -r '.lookback_days // 14' "$WATCH_CONFIG" 2>/dev/null || printf '14')}"
-  since="$(date -d "$lookback days ago" '+%Y-%m-%d')"
-  data="$(fetch_url "$CISA_KEV_URL")"
-  [[ -n "$data" ]] || {
-    printf '0'
-    return
-  }
-
-  printf '%s\n' "$data" |
-    jq --arg regex "$regex" --arg since "$since" '
-      [.vulnerabilities[]?
-        | select((.dateAdded // "0000-00-00") >= $since)
-        | select(([.cveID, .vendorProject, .product, .vulnerabilityName, .shortDescription] | join(" ")) | test($regex; "i"))]
-      | length
-    ' 2>/dev/null || printf '0'
-}
-
-count_nvd_recent_matches() {
-  local regex since data
-
-  regex="$(keywords_regex)"
-  [[ -n "$regex" ]] || {
-    printf '0'
-    return
-  }
-
-  since="$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')"
-  data="$(fetch_url "$NVD_RECENT_URL" | gzip -dc 2>/dev/null || true)"
-  [[ -n "$data" ]] || {
-    printf '0'
-    return
-  }
-
-  printf '%s\n' "$data" |
-    jq --arg regex "$regex" --arg since "$since" '
-      [.vulnerabilities[]?
-        | select((.cve.vulnStatus // "") != "Rejected")
-        | select(((.cve.lastModified // .cve.published // "")[0:10]) >= $since)
-        | select(([.cve.id, (.cve.descriptions[]?.value // "")] | join(" ")) | test($regex; "i"))
-        | select([
-            .cve.metrics.cvssMetricV31[]?.cvssData.baseSeverity,
-            .cve.metrics.cvssMetricV30[]?.cvssData.baseSeverity,
-            .cve.metrics.cvssMetricV2[]?.baseSeverity
-          ] | any(. == "HIGH" or . == "CRITICAL"))
-      ]
-      | length
-    ' 2>/dev/null || printf '0'
-}
-
 filter_trivy_json() {
   local json="$1"
 
@@ -429,6 +371,7 @@ write_trivy_dependency_report() {
           | block
         ' 2>/dev/null
     fi
+    printf '\nTip: jless %s\n' "$DEP_JSON_FILE"
   } > "$DEP_REPORT_FILE"
 
   {
@@ -566,12 +509,20 @@ else
       debug_log "running osv-scanner"
       dep_json="$(osv-scanner scan source -r --format json "$PROJECTS_DIR" 2>/dev/null || true)"
       printf '%s\n' "$dep_json" > "$DEP_JSON_FILE"
-      DEP_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]?] | length')"
-      DEP_CRITICAL_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select((.database_specific.severity // .severity // "") | ascii_upcase == "CRITICAL")] | length')"
-      DEP_HIGH_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select((.database_specific.severity // .severity // "") | ascii_upcase == "HIGH")] | length')"
-      DEP_MEDIUM_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select((.database_specific.severity // .severity // "") | ascii_upcase == "MEDIUM")] | length')"
-      DEP_LOW_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select((.database_specific.severity // .severity // "") | ascii_upcase == "LOW")] | length')"
-      DEP_RECENT_COUNT="$(printf '%s\n' "$dep_json" | jq_count --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select(((.modified // .published // "")[0:10]) >= $since)] | length')"
+      read -r DEP_COUNT DEP_CRITICAL_COUNT DEP_HIGH_COUNT DEP_MEDIUM_COUNT DEP_LOW_COUNT DEP_RECENT_COUNT < <(
+        printf '%s\n' "$dep_json" | jq -r --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '
+          [.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]?] as $vulns
+          | def sev: (.database_specific.severity // .severity // "") | ascii_upcase;
+          [
+            ($vulns | length),
+            ($vulns | map(select(sev == "CRITICAL")) | length),
+            ($vulns | map(select(sev == "HIGH")) | length),
+            ($vulns | map(select(sev == "MEDIUM")) | length),
+            ($vulns | map(select(sev == "LOW")) | length),
+            ($vulns | map(select(((.modified // .published // "")[0:10]) >= $since)) | length)
+          ] | @tsv
+        ' 2>/dev/null || printf '0\t0\t0\t0\t0\t0'
+      )
     elif command -v trivy >/dev/null 2>&1; then
       SCANNER=trivy
       debug_log "running Trivy filesystem scan"
@@ -579,14 +530,21 @@ else
       debug_log "filtering Trivy results"
       dep_json="$(filter_trivy_json "$dep_json")"
       printf '%s\n' "$dep_json" > "$DEP_JSON_FILE"
-      DEP_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.Results[]?.Vulnerabilities[]?] | length')"
-      DEP_CRITICAL_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length')"
-      DEP_HIGH_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length')"
-      DEP_MEDIUM_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length')"
-      DEP_LOW_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.Results[]?.Vulnerabilities[]? | select(.Severity == "LOW")] | length')"
-      DEP_RECENT_COUNT="$(printf '%s\n' "$dep_json" | jq_count --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)] | length')"
-      DEP_RECENT_CRITICAL_COUNT="$(printf '%s\n' "$dep_json" | jq_count --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)] | length')"
-      DEP_RECENT_HIGH_COUNT="$(printf '%s\n' "$dep_json" | jq_count --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)] | length')"
+      read -r DEP_COUNT DEP_CRITICAL_COUNT DEP_HIGH_COUNT DEP_MEDIUM_COUNT DEP_LOW_COUNT DEP_RECENT_COUNT DEP_RECENT_CRITICAL_COUNT DEP_RECENT_HIGH_COUNT < <(
+        printf '%s\n' "$dep_json" | jq -r --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '
+          [.Results[]?.Vulnerabilities[]?] as $vulns
+          | [
+              ($vulns | length),
+              ($vulns | map(select(.Severity == "CRITICAL")) | length),
+              ($vulns | map(select(.Severity == "HIGH")) | length),
+              ($vulns | map(select(.Severity == "MEDIUM")) | length),
+              ($vulns | map(select(.Severity == "LOW")) | length),
+              ($vulns | map(select(.Severity == "CRITICAL" or .Severity == "HIGH") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)) | length),
+              ($vulns | map(select(.Severity == "CRITICAL") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)) | length),
+              ($vulns | map(select(.Severity == "HIGH") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)) | length)
+            ] | @tsv
+        ' 2>/dev/null || printf '0\t0\t0\t0\t0\t0\t0\t0'
+      )
     else
       debug_log "no dependency scanner found"
     fi
@@ -611,6 +569,7 @@ else
         printf 'Total: %s\n' "$DEP_COUNT"
         printf '\n'
         printf 'Raw JSON: %s\n' "$DEP_JSON_FILE"
+        printf '\nTip: jless %s\n' "$DEP_JSON_FILE"
       } > "$DEP_REPORT_FILE"
     fi
   else
@@ -619,19 +578,75 @@ else
 
   if [[ -f "$WATCH_CONFIG" ]] && command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     debug_log "checking public watch feeds"
+    _feeds_regex="$(keywords_regex)"
+    _cisa_tmp=
+    _cisa_pid=
+    _nvd_tmp=
+    _nvd_pid=
+
+    if [[ -n "$_feeds_regex" ]]; then
+      if feed_enabled cisa-kev; then
+        debug_log "fetching CISA KEV"
+        _cisa_tmp="$(mktemp)"
+        fetch_url "$CISA_KEV_URL" > "$_cisa_tmp" &
+        _cisa_pid=$!
+      fi
+      if feed_enabled nvd-recent; then
+        debug_log "fetching NVD recent"
+        _nvd_tmp="$(mktemp)"
+        { fetch_url "$NVD_RECENT_URL" | gzip -dc 2>/dev/null || true; } > "$_nvd_tmp" &
+        _nvd_pid=$!
+      fi
+    fi
+
     if feed_enabled manual; then
       debug_log "counting manual watch CVEs"
       MANUAL_WATCH_COUNT="$(count_manual_watch_cves)"
     fi
-    if feed_enabled cisa-kev; then
-      debug_log "checking CISA KEV matches"
-      CISA_KEV_COUNT="$(count_cisa_kev_matches)"
-      CISA_KEV_RECENT_COUNT="$(count_cisa_kev_matches "$RECENT_DAYS")"
+
+    [[ -n "$_cisa_pid" ]] && wait "$_cisa_pid" || true
+    [[ -n "$_nvd_pid" ]] && wait "$_nvd_pid" || true
+
+    if [[ -n "$_cisa_tmp" ]]; then
+      if [[ -s "$_cisa_tmp" ]]; then
+        debug_log "counting CISA KEV matches"
+        _cisa_lookback="$(jq -r '.lookback_days // 14' "$WATCH_CONFIG" 2>/dev/null || printf '14')"
+        read -r CISA_KEV_COUNT CISA_KEV_RECENT_COUNT < <(
+          jq -r --arg regex "$_feeds_regex" \
+              --arg since "$(date -d "$_cisa_lookback days ago" '+%Y-%m-%d')" \
+              --arg since_recent "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '
+            def match_entry: [.cveID, .vendorProject, .product, .vulnerabilityName, .shortDescription] | join(" ");
+            [
+              ([.vulnerabilities[]? | select((.dateAdded // "0000-00-00") >= $since)       | select(match_entry | test($regex; "i"))] | length),
+              ([.vulnerabilities[]? | select((.dateAdded // "0000-00-00") >= $since_recent) | select(match_entry | test($regex; "i"))] | length)
+            ] | @tsv
+          ' "$_cisa_tmp" 2>/dev/null || printf '0\t0'
+        )
+      fi
+      rm -f "$_cisa_tmp"
     fi
-    if feed_enabled nvd-recent; then
-      debug_log "checking NVD Recent matches"
-      NVD_RECENT_COUNT="$(count_nvd_recent_matches)"
+
+    if [[ -n "$_nvd_tmp" ]]; then
+      if [[ -s "$_nvd_tmp" ]]; then
+        debug_log "counting NVD recent matches"
+        NVD_RECENT_COUNT="$(
+          jq -r --arg regex "$_feeds_regex" --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '
+            [.vulnerabilities[]?
+              | select((.cve.vulnStatus // "") != "Rejected")
+              | select(((.cve.lastModified // .cve.published // "")[0:10]) >= $since)
+              | select(([.cve.id, (.cve.descriptions[]?.value // "")] | join(" ")) | test($regex; "i"))
+              | select([
+                  .cve.metrics.cvssMetricV31[]?.cvssData.baseSeverity,
+                  .cve.metrics.cvssMetricV30[]?.cvssData.baseSeverity,
+                  .cve.metrics.cvssMetricV2[]?.baseSeverity
+                ] | any(. == "HIGH" or . == "CRITICAL"))]
+            | length
+          ' "$_nvd_tmp" 2>/dev/null || printf '0'
+        )"
+      fi
+      rm -f "$_nvd_tmp"
     fi
+
     WATCH_COUNT=$((MANUAL_WATCH_COUNT + CISA_KEV_COUNT + NVD_RECENT_COUNT))
     debug_log "watch feed count: $WATCH_COUNT"
   else
