@@ -148,13 +148,16 @@ repository mirrors and per-scan worktrees under:
 For a local-files-only scan without the webserver, run:
 
 ```bash
+bin/sec-watch-local
 bin/sec-watch-local /path/to/project
 ```
 
-This scans only the local dependency files under the selected directory. The
-scanner settings start from `bin/sec-watch defaults-env`, so GNOME preferences
-and `SEC_WATCH_*` environment overrides are shared. To skip Fedora advisory
-checks for a dependency-only local scan, pass `--no-os-advisories`.
+With no path, the CLI starts from the shared projects directory, which defaults
+to `~/Projects`. This scans only the local dependency files under the selected
+directory. The scanner settings start from `bin/sec-watch defaults-env`, so
+GNOME preferences and `SEC_WATCH_*` environment overrides are shared. To skip
+Fedora advisory checks for a dependency-only local scan, pass
+`--no-os-advisories`.
 Normal CLI output prints progress while it validates the path, prepares any
 branch worktree, runs the scanner, and writes reports. `--json` stays quiet
 until the final machine-readable result. Add `--debug` to print effective

@@ -131,6 +131,12 @@ def default_scan_env(scanner: Path, timeout: int) -> dict[str, str]:
     return env
 
 
+def default_local_path(args: argparse.Namespace) -> Path:
+    scanner = Path(args.scanner).expanduser().resolve()
+    env = default_scan_env(scanner, args.git_timeout)
+    return Path(env.get("SEC_WATCH_PROJECTS_DIR") or (Path.home() / "Projects")).expanduser()
+
+
 def validate_local_path(value: str) -> Path:
     path = Path(value).expanduser().resolve()
     if not path.exists() or not path.is_dir():
@@ -311,7 +317,7 @@ def print_human(data: dict[str, Any]) -> None:
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scan local files with Security Watch.")
-    parser.add_argument("path", nargs="?", default=".", help="Local directory to scan.")
+    parser.add_argument("path", nargs="?", help="Local directory to scan. Defaults to the shared projects directory.")
     parser.add_argument("--branch", help="Scan a local Git branch through a cached worktree instead of the current files.")
     parser.add_argument("--cache-root", default=os.environ.get("SEC_WATCH_LOCAL_CACHE", str(default_cache_root())))
     parser.add_argument("--scanner", default=os.environ.get("SEC_WATCH_SCANNER", str(script_dir() / "sec-watch")))
@@ -331,6 +337,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
 
     try:
+        if args.path is None:
+            args.path = str(default_local_path(args))
         progress(args, f"Validating local path: {args.path}")
         source_path = validate_local_path(args.path)
         cache_root = Path(args.cache_root).expanduser().resolve()
