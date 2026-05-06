@@ -1,8 +1,0 @@
-{
-  "uuid": "sec-watch@local",
-  "name": "Security Watch",
-  "description": "Top-bar security advisory count for Fedora packages and project dependencies.",
-  "settings-schema": "org.gnome.shell.extensions.sec-watch",
-  "shell-version": ["50"],
-  "version": 6
-}

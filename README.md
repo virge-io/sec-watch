@@ -1,171 +1,40 @@
-# Security Watch
+# Security Watch CLI
 
-Security Watch is a local GNOME Shell extension and scanner helper for Fedora workstations.
+Security Watch CLI scans local project files for security signals on Fedora
+workstations.
 
-It shows a top-bar security count using:
+It reports:
 
-- Fedora security advisories from `dnf5 advisory`
-- local project dependency vulnerabilities from Trivy
-- optional public watch feeds: manual CVEs, CISA KEV, and NVD Recent
-
-It can also notify when selected categories increase and rescan after dependency lockfiles change.
+- Fedora security advisories from `dnf5 advisory` or `dnf updateinfo`
+- local project dependency vulnerabilities from Trivy or OSV Scanner
+- optional public watch-feed matches from manual CVEs, CISA KEV, and NVD Recent
 
 ## Requirements
 
-- Fedora Workstation with GNOME Shell 50
-- `dnf5`
-- `trivy`
-- `jq`
-- `curl`
-- `glib-compile-schemas`
+- Python 3.10 or newer
+- Bash, `jq`, `curl`, and `gzip`
+- `dnf5` or `dnf` for Fedora OS advisories
+- `trivy` or `osv-scanner` for dependency scanning
 
-Install the runtime packages:
+Install the common Fedora runtime packages:
 
 ```bash
-sudo dnf install trivy jq curl glib2
+sudo dnf install trivy jq curl
 ```
 
-## Install
+## Usage
 
-```bash
-./install.sh
-```
-
-Then log out and back in, or restart GNOME Shell if your session supports it.
-
-Enable the extension:
-
-```bash
-gnome-extensions enable sec-watch@local
-```
-
-Open preferences:
-
-```bash
-gnome-extensions prefs sec-watch@local
-```
-
-## Configuration
-
-The GNOME preferences page controls:
-
-- project root directory
-- selected projects
-- enabled dependency ecosystems
-- enabled public vulnerability feeds
-- notification categories
-- scan interval
-- lockfile change watching
-
-Manual watch entries and public-feed keywords live in:
-
-```text
-~/.config/sec-watch/watch.json
-```
-
-This repo includes a starter template at:
-
-```text
-config/watch.example.json
-```
-
-## Reports
-
-Generated reports are written to:
-
-```text
-~/.cache/sec-watch/dependency-report.html
-~/.cache/sec-watch/dependency-report.txt
-~/.cache/sec-watch/dependency-report.json
-```
-
-Trivy reports include CVSS score, attack vector, attack complexity, privileges,
-and user interaction columns. The HTML tables can be sorted by clicking the
-column headers.
-
-They are not tracked by git.
-
-Sanitized example reports are tracked for reference:
-
-```text
-examples/dependency-report.html
-examples/dependency-report.txt
-```
-
-## Web Server
-
-The `sec-watch-web` branch also includes a FastAPI wrapper for scanning a Git
-repository and branch from a browser or JSON client.
-
-Install `uv` if it is not already available, then sync the Python server
-dependencies:
-
-```bash
-uv --version
-uv sync
-```
-
-Run it locally:
-
-```bash
-uv run bin/sec-watch-server
-```
-
-For LAN access, bind to a LAN address and set a token:
-
-```bash
-SEC_WATCH_WEB_TOKEN='change-me' uv run bin/sec-watch-server --host 0.0.0.0
-```
-
-LAN clients can pass the token as `X-Sec-Watch-Token`, `Authorization: Bearer
-...`, or `?token=...`. JSON clients can start a scan with `POST /scans` and
-poll `GET /api/scans/<id>`. Scan pages refresh while a job is queued or running
-and show the current stage.
-
-Scanner defaults are centralized in `bin/sec-watch defaults-env`. The webserver
-loads those defaults first, including installed GNOME extension settings when
-available, then overrides the project directory with the requested scan
-worktree. Server-specific overrides can be passed with:
-
-```bash
-SEC_WATCH_WEB_ECOSYSTEMS=npm,pip \
-SEC_WATCH_WEB_PUBLIC_FEEDS=manual,cisa-kev \
-SEC_WATCH_WEB_RECENT_DAYS=14 \
-SEC_WATCH_WEB_OS_ADVISORIES=1 \
-SEC_WATCH_WEB_DEBUG=1 \
-uv run bin/sec-watch-server
-```
-
-The server accepts Git URLs and existing local Git repository paths. It keeps
-repository mirrors and per-scan worktrees under:
-
-```text
-~/.cache/sec-watch-web
-```
-
-## Local CLI
-
-For a local-files-only scan without the webserver, run:
+Run a scan from the shared projects directory:
 
 ```bash
 bin/sec-watch-local
-bin/sec-watch-local /path/to/project
 ```
 
-With no path, the CLI starts from the shared projects directory, which defaults
-to `~/Projects`. This scans only the local dependency files under the selected
-directory. The scanner settings start from `bin/sec-watch defaults-env`, so
-GNOME preferences and `SEC_WATCH_*` environment overrides are shared. To skip
-Fedora advisory checks for a dependency-only local scan, pass
-`--no-os-advisories`.
-Normal CLI output prints progress while it validates the path, prepares any
-branch worktree, runs the scanner, and writes reports. `--json` stays quiet
-until the final machine-readable result. Add `--debug` to print effective
-scanner settings and internal scanner milestones. Fedora advisory queries are
-bounded by `SEC_WATCH_OS_TIMEOUT`, which defaults to 60 seconds:
+With no path, the CLI starts from `~/Projects`. To scan a specific local
+directory:
 
 ```bash
-SEC_WATCH_OS_TIMEOUT=15 bin/sec-watch-local . --debug
+bin/sec-watch-local /path/to/project
 ```
 
 To scan a local Git branch without changing your working tree:
@@ -174,45 +43,87 @@ To scan a local Git branch without changing your working tree:
 bin/sec-watch-local /path/to/repo --branch main
 ```
 
-The CLI stores its run cache and reports under:
-
-```text
-~/.cache/sec-watch-local
-```
-
-Local CLI-specific overrides use the `SEC_WATCH_LOCAL_*` prefix or matching
-flags:
+Normal output prints progress to stderr and a summary to stdout. JSON mode keeps
+stdout machine-readable until the final result:
 
 ```bash
-SEC_WATCH_LOCAL_ECOSYSTEMS=npm,pip bin/sec-watch-local .
-bin/sec-watch-local . --public-feeds '' --no-os-advisories
+bin/sec-watch-local --json
 ```
+
+Debug mode prints effective scanner settings and internal scanner milestones:
+
+```bash
+bin/sec-watch-local --debug --progress-interval 1
+```
+
+## Configuration
+
+Defaults are centralized in:
+
+```bash
+bin/sec-watch defaults-env
+```
+
+Default values:
+
+- `SEC_WATCH_PROJECTS_DIR=$HOME/Projects`
+- `SEC_WATCH_PROJECTS=` scans all projects under the selected directory
+- `SEC_WATCH_ECOSYSTEMS=npm,yarn,pnpm,pip,poetry,uv,python-pkg`
+- `SEC_WATCH_PUBLIC_FEEDS=manual,cisa-kev,nvd-recent`
+- `SEC_WATCH_RECENT_DAYS=7`
+- `SEC_WATCH_OS_ADVISORIES=1`
+- `SEC_WATCH_OS_TIMEOUT=60`
+- `SEC_WATCH_CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/sec-watch/watch.json`
+
+Every `SEC_WATCH_*` value can be overridden in the environment. The local CLI
+also accepts matching flags or `SEC_WATCH_LOCAL_*` overrides:
+
+```bash
+SEC_WATCH_PROJECTS_DIR=~/Code bin/sec-watch-local
+SEC_WATCH_LOCAL_ECOSYSTEMS=npm,pip bin/sec-watch-local
+bin/sec-watch-local --public-feeds '' --no-os-advisories
+SEC_WATCH_OS_TIMEOUT=15 bin/sec-watch-local --debug
+```
+
+Manual watch entries and public-feed keywords live in:
+
+```text
+~/.config/sec-watch/watch.json
+```
+
+This repo includes a starter template:
+
+```text
+config/watch.example.json
+```
+
+## Reports
+
+The local CLI stores each run under:
+
+```text
+~/.cache/sec-watch-local/jobs/
+```
+
+Each scan writes report paths in the final output:
+
+```text
+dependency-report.html
+dependency-report.txt
+dependency-report.json
+```
+
+Trivy reports include CVSS score, attack vector, attack complexity, privileges,
+and user interaction columns. The HTML tables can be sorted by clicking column
+headers.
 
 ## Development
 
-After changing the schema:
+There is no package manager or build step for the CLI branch. Before handing off
+changes, run:
 
 ```bash
-glib-compile-schemas extension/schemas
+bash -n bin/sec-watch
+python3 -m py_compile bin/sec-watch-local
+git diff --check
 ```
-
-After installing local changes:
-
-```bash
-./install.sh
-gnome-extensions disable sec-watch@local
-gnome-extensions enable sec-watch@local
-```
-
-For extension code changes on Wayland, use a nested GNOME Shell instead of
-logging out of the real desktop:
-
-```bash
-bin/sec-watch-dev-shell
-```
-
-Wayland sessions cannot restart the logged-in GNOME Shell process. The helper
-installs the extension, starts a nested Wayland Shell, and enables the extension
-inside that nested session so each run gets a fresh extension process. On GNOME
-49 and later, Fedora may need `mutter-devel` installed for the nested
-development kit.

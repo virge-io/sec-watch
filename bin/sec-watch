@@ -10,96 +10,6 @@ DEFAULT_RECENT_DAYS="7"
 DEFAULT_OS_ADVISORIES="1"
 DEFAULT_OS_TIMEOUT="60"
 DEFAULT_WATCH_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/sec-watch/watch.json"
-GSETTINGS_SCHEMA="org.gnome.shell.extensions.sec-watch"
-
-gsettings_schema_available() {
-  command -v gsettings >/dev/null 2>&1 &&
-    gsettings list-schemas 2>/dev/null | grep -qx "$GSETTINGS_SCHEMA"
-}
-
-gvariant_string() {
-  local value="$1"
-  value="${value#\'}"
-  value="${value%\'}"
-  value="${value//\\\'/\'}"
-  printf '%s' "$value"
-}
-
-gvariant_strv_csv() {
-  local value="$1"
-
-  value="${value#@as }"
-  if [[ "$value" == "[]" ]]; then
-    printf ''
-    return
-  fi
-
-  value="${value#[}"
-  value="${value%]}"
-  value="${value//\', \'/,}"
-  value="${value#\'}"
-  value="${value%\'}"
-  value="${value//\\\'/\'}"
-  printf '%s' "$value"
-}
-
-gnome_setting_string() {
-  local key="$1"
-  local fallback="$2"
-  local value
-
-  if gsettings_schema_available; then
-    value="$(gsettings get "$GSETTINGS_SCHEMA" "$key" 2>/dev/null || true)"
-    if [[ -n "$value" ]]; then
-      value="$(gvariant_string "$value")"
-      if [[ -n "$value" ]]; then
-        printf '%s' "$value"
-        return
-      fi
-    fi
-  fi
-
-  printf '%s' "$fallback"
-}
-
-gnome_setting_strv() {
-  local key="$1"
-  local fallback="$2"
-  local value
-
-  if gsettings_schema_available; then
-    value="$(gsettings get "$GSETTINGS_SCHEMA" "$key" 2>/dev/null || true)"
-    if [[ -n "$value" ]]; then
-      value="$(gvariant_strv_csv "$value")"
-      printf '%s' "$value"
-      return
-    fi
-  fi
-
-  printf '%s' "$fallback"
-}
-
-gnome_setting_int() {
-  local key="$1"
-  local fallback="$2"
-  local value
-
-  if gsettings_schema_available; then
-    value="$(gsettings get "$GSETTINGS_SCHEMA" "$key" 2>/dev/null || true)"
-    if [[ "$value" =~ ^[0-9]+$ ]]; then
-      printf '%s' "$value"
-      return
-    fi
-  fi
-
-  printf '%s' "$fallback"
-}
-
-DEFAULT_PROJECTS_DIR="$(gnome_setting_string projects-dir "$DEFAULT_PROJECTS_DIR")"
-DEFAULT_SELECTED_PROJECTS="$(gnome_setting_strv selected-projects "$DEFAULT_SELECTED_PROJECTS")"
-DEFAULT_ECOSYSTEMS="$(gnome_setting_strv enabled-ecosystems "$DEFAULT_ECOSYSTEMS")"
-DEFAULT_PUBLIC_FEEDS="$(gnome_setting_strv enabled-public-feeds "$DEFAULT_PUBLIC_FEEDS")"
-DEFAULT_TTL_SECONDS="$(gnome_setting_int scan-interval "$DEFAULT_TTL_SECONDS")"
 
 emit_defaults_env() {
   local projects="$DEFAULT_SELECTED_PROJECTS"
@@ -131,6 +41,24 @@ if [[ "${1:-}" == "defaults-env" ]]; then
   emit_defaults_env
   exit 0
 fi
+
+usage() {
+  echo "Usage: sec-watch [status|defaults-env]" >&2
+}
+
+COMMAND="${1:-status}"
+case "$COMMAND" in
+  status)
+    ;;
+  help|-h|--help)
+    usage
+    exit 0
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac
 
 PROJECTS_DIR="${SEC_WATCH_PROJECTS_DIR:-${PROJECTS_DIR:-$DEFAULT_PROJECTS_DIR}}"
 if [[ -v SEC_WATCH_ECOSYSTEMS ]]; then
@@ -203,6 +131,17 @@ feed_enabled() {
     *",$1,"*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+jq_count() {
+  local value
+
+  value="$(jq "$@" 2>/dev/null || true)"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$value"
+  else
+    printf '0'
+  fi
 }
 
 keywords_regex() {
@@ -288,12 +227,6 @@ count_nvd_recent_matches() {
     ' 2>/dev/null || printf '0'
 }
 
-format_recent_suffix() {
-  if [[ "${1:-0}" -gt 0 ]]; then
-    printf ' ↑%s' "$1"
-  fi
-}
-
 filter_trivy_json() {
   local json="$1"
 
@@ -315,86 +248,6 @@ filter_trivy_json() {
             )
         ]
     ' 2>/dev/null || printf '%s\n' "$json"
-}
-
-ecosystem_selected() {
-  if [[ "$ECOSYSTEM_FILTER_SET" != "1" ]]; then
-    return 0
-  fi
-
-  case ",$ENABLED_ECOSYSTEMS," in
-    *",$1,"*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-should_watch_dependency_file() {
-  local path="$1"
-  local name="${path##*/}"
-
-  case "$name" in
-    package-lock.json)
-      ecosystem_selected npm
-      ;;
-    package.json)
-      ecosystem_selected npm || ecosystem_selected yarn || ecosystem_selected pnpm
-      ;;
-    yarn.lock)
-      ecosystem_selected yarn
-      ;;
-    pnpm-lock.yaml|pnpm-lock.yml)
-      ecosystem_selected pnpm
-      ;;
-    requirements*.txt|Pipfile.lock)
-      ecosystem_selected pip
-      ;;
-    poetry.lock)
-      ecosystem_selected poetry
-      ;;
-    uv.lock)
-      ecosystem_selected uv
-      ;;
-    pyproject.toml)
-      ecosystem_selected pip || ecosystem_selected poetry || ecosystem_selected uv
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-list_dependency_watch_files() {
-  local roots=()
-  local project root
-
-  if [[ -n "$SELECTED_PROJECTS" ]]; then
-    IFS=',' read -r -a roots <<< "$SELECTED_PROJECTS"
-    for project in "${roots[@]}"; do
-      root="$PROJECTS_DIR/$project"
-      [[ -d "$root" ]] || continue
-      find "$root" \
-        \( -path '*/.git' -o -path '*/node_modules' -o -path '*/.venv' -o -path '*/venv' \) -prune -o \
-        -type f \( \
-          -name 'package-lock.json' -o -name 'package.json' -o -name 'yarn.lock' -o \
-          -name 'pnpm-lock.yaml' -o -name 'pnpm-lock.yml' -o -name 'requirements*.txt' -o \
-          -name 'Pipfile.lock' -o -name 'poetry.lock' -o -name 'uv.lock' -o -name 'pyproject.toml' \
-        \) -print 2>/dev/null
-    done
-  elif [[ -d "$PROJECTS_DIR" ]]; then
-    find "$PROJECTS_DIR" \
-      \( -path '*/.git' -o -path '*/node_modules' -o -path '*/.venv' -o -path '*/venv' \) -prune -o \
-      -type f \( \
-        -name 'package-lock.json' -o -name 'package.json' -o -name 'yarn.lock' -o \
-        -name 'pnpm-lock.yaml' -o -name 'pnpm-lock.yml' -o -name 'requirements*.txt' -o \
-        -name 'Pipfile.lock' -o -name 'poetry.lock' -o -name 'uv.lock' -o -name 'pyproject.toml' \
-      \) -print 2>/dev/null
-  fi |
-    while IFS= read -r path; do
-      if should_watch_dependency_file "$path"; then
-        printf '%s\n' "$path"
-      fi
-    done |
-    sort -u
 }
 
 write_trivy_dependency_report() {
@@ -752,7 +605,7 @@ else
       if [[ "$os_status" -eq 124 ]]; then
         debug_log "dnf5 advisory query timed out after ${OS_TIMEOUT}s"
       fi
-      OS_COUNT="$(printf '%s\n' "$os_json" | jq 'length' 2>/dev/null || printf '0')"
+      OS_COUNT="$(printf '%s\n' "$os_json" | jq_count 'length')"
     elif command -v dnf >/dev/null 2>&1; then
       debug_log "running dnf updateinfo query"
       os_output="$(run_with_timeout "$OS_TIMEOUT" dnf updateinfo list updates security 2>/dev/null)"
@@ -776,12 +629,12 @@ else
       debug_log "running osv-scanner"
       dep_json="$(osv-scanner scan source -r --format json "$PROJECTS_DIR" 2>/dev/null || true)"
       printf '%s\n' "$dep_json" > "$DEP_JSON_FILE"
-      DEP_COUNT="$(printf '%s\n' "$dep_json" | jq '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]?] | length' 2>/dev/null || printf '0')"
-      DEP_CRITICAL_COUNT="$(printf '%s\n' "$dep_json" | jq '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select((.database_specific.severity // .severity // "") | ascii_upcase == "CRITICAL")] | length' 2>/dev/null || printf '0')"
-      DEP_HIGH_COUNT="$(printf '%s\n' "$dep_json" | jq '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select((.database_specific.severity // .severity // "") | ascii_upcase == "HIGH")] | length' 2>/dev/null || printf '0')"
-      DEP_MEDIUM_COUNT="$(printf '%s\n' "$dep_json" | jq '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select((.database_specific.severity // .severity // "") | ascii_upcase == "MEDIUM")] | length' 2>/dev/null || printf '0')"
-      DEP_LOW_COUNT="$(printf '%s\n' "$dep_json" | jq '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select((.database_specific.severity // .severity // "") | ascii_upcase == "LOW")] | length' 2>/dev/null || printf '0')"
-      DEP_RECENT_COUNT="$(printf '%s\n' "$dep_json" | jq --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select(((.modified // .published // "")[0:10]) >= $since)] | length' 2>/dev/null || printf '0')"
+      DEP_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]?] | length')"
+      DEP_CRITICAL_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select((.database_specific.severity // .severity // "") | ascii_upcase == "CRITICAL")] | length')"
+      DEP_HIGH_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select((.database_specific.severity // .severity // "") | ascii_upcase == "HIGH")] | length')"
+      DEP_MEDIUM_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select((.database_specific.severity // .severity // "") | ascii_upcase == "MEDIUM")] | length')"
+      DEP_LOW_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select((.database_specific.severity // .severity // "") | ascii_upcase == "LOW")] | length')"
+      DEP_RECENT_COUNT="$(printf '%s\n' "$dep_json" | jq_count --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select(((.modified // .published // "")[0:10]) >= $since)] | length')"
     elif command -v trivy >/dev/null 2>&1; then
       SCANNER=trivy
       debug_log "running Trivy filesystem scan"
@@ -789,14 +642,14 @@ else
       debug_log "filtering Trivy results"
       dep_json="$(filter_trivy_json "$dep_json")"
       printf '%s\n' "$dep_json" > "$DEP_JSON_FILE"
-      DEP_COUNT="$(printf '%s\n' "$dep_json" | jq '[.Results[]?.Vulnerabilities[]?] | length' 2>/dev/null || printf '0')"
-      DEP_CRITICAL_COUNT="$(printf '%s\n' "$dep_json" | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length' 2>/dev/null || printf '0')"
-      DEP_HIGH_COUNT="$(printf '%s\n' "$dep_json" | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length' 2>/dev/null || printf '0')"
-      DEP_MEDIUM_COUNT="$(printf '%s\n' "$dep_json" | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length' 2>/dev/null || printf '0')"
-      DEP_LOW_COUNT="$(printf '%s\n' "$dep_json" | jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "LOW")] | length' 2>/dev/null || printf '0')"
-      DEP_RECENT_COUNT="$(printf '%s\n' "$dep_json" | jq --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)] | length' 2>/dev/null || printf '0')"
-      DEP_RECENT_CRITICAL_COUNT="$(printf '%s\n' "$dep_json" | jq --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)] | length' 2>/dev/null || printf '0')"
-      DEP_RECENT_HIGH_COUNT="$(printf '%s\n' "$dep_json" | jq --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)] | length' 2>/dev/null || printf '0')"
+      DEP_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.Results[]?.Vulnerabilities[]?] | length')"
+      DEP_CRITICAL_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL")] | length')"
+      DEP_HIGH_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH")] | length')"
+      DEP_MEDIUM_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.Results[]?.Vulnerabilities[]? | select(.Severity == "MEDIUM")] | length')"
+      DEP_LOW_COUNT="$(printf '%s\n' "$dep_json" | jq_count '[.Results[]?.Vulnerabilities[]? | select(.Severity == "LOW")] | length')"
+      DEP_RECENT_COUNT="$(printf '%s\n' "$dep_json" | jq_count --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)] | length')"
+      DEP_RECENT_CRITICAL_COUNT="$(printf '%s\n' "$dep_json" | jq_count --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)] | length')"
+      DEP_RECENT_HIGH_COUNT="$(printf '%s\n' "$dep_json" | jq_count --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)] | length')"
     else
       debug_log "no dependency scanner found"
     fi
@@ -877,71 +730,18 @@ else
   } > "$CACHE_FILE"
 fi
 
-case "${1:-argos}" in
-  lockfiles)
-    list_dependency_watch_files
-    ;;
-  argos)
-    total=$((OS_COUNT + DEP_IMPORTANT_COUNT + WATCH_COUNT))
-    if [[ "$total" -gt 0 ]]; then
-      echo "Sec: $total | color=#ff6b35"
-    elif [[ "$SCANNER" == "none" ]]; then
-      echo "Sec: OS | color=#f6c177"
-    else
-      echo "Sec: OK | color=#66bb6a"
-    fi
-    echo "---"
-    echo "Fedora security advisories: $OS_COUNT"
-    echo "Deps critical: $DEP_CRITICAL_COUNT$(format_recent_suffix "$DEP_RECENT_CRITICAL_COUNT")"
-    echo "Deps high: $DEP_HIGH_COUNT$(format_recent_suffix "$DEP_RECENT_HIGH_COUNT")"
-    echo "Deps medium: $DEP_MEDIUM_COUNT"
-    echo "Deps low: $DEP_LOW_COUNT"
-    echo "Deps total: $DEP_COUNT"
-    echo "Recent changes: $RECENT_CHANGE_COUNT"
-    echo "Recent dep changes: $DEP_RECENT_COUNT"
-    echo "Watch matches: $WATCH_COUNT"
-    echo "Manual watches: $MANUAL_WATCH_COUNT"
-    echo "CISA KEV recent matches: $CISA_KEV_COUNT"
-    echo "NVD recent high/critical matches: $NVD_RECENT_COUNT"
-    echo "Project scanner: $SCANNER"
-    echo "Dependency report: $DEP_HTML_REPORT_FILE"
-    echo "Text report: $DEP_REPORT_FILE"
-    echo "Projects directory: $PROJECTS_DIR"
-    echo "Selected projects: ${SELECTED_PROJECTS:-all}"
-    echo "Enabled ecosystems: ${ENABLED_ECOSYSTEMS:-all}"
-    echo "Public feeds: ${PUBLIC_FEEDS:-none}"
-    echo "Watch config: $WATCH_CONFIG"
-    echo "Last scan: $(date -d "@$UPDATED_AT" '+%Y-%m-%d %H:%M:%S')"
-    echo "---"
-    echo "Refresh | bash='SEC_WATCH_FORCE=1 $HOME/.local/bin/sec-watch argos' terminal=false refresh=true"
-    echo "Fedora advisories | bash='dnf5 advisory list --updates --security --with-cve' terminal=true"
-    if [[ "$SCANNER" == "osv-scanner" ]]; then
-      echo "Scan Projects | bash='osv-scanner scan source -r $PROJECTS_DIR' terminal=true"
-    elif [[ "$SCANNER" == "trivy" ]]; then
-      echo "Scan Projects | bash='trivy fs --scanners vuln $PROJECTS_DIR' terminal=true"
-    else
-      echo "Install project scanner | bash='printf \"Install osv-scanner or trivy, then refresh.\\n\"; read -r _' terminal=true"
-    fi
-    ;;
-  status)
-    echo "$SUMMARY"
-    echo "project_total=$DEP_COUNT"
-    echo "project_critical=$DEP_CRITICAL_COUNT"
-    echo "project_high=$DEP_HIGH_COUNT"
-    echo "project_medium=$DEP_MEDIUM_COUNT"
-    echo "project_low=$DEP_LOW_COUNT"
-    echo "project_recent=$DEP_RECENT_COUNT"
-    echo "project_recent_critical=$DEP_RECENT_CRITICAL_COUNT"
-    echo "project_recent_high=$DEP_RECENT_HIGH_COUNT"
-    echo "recent_changes=$RECENT_CHANGE_COUNT"
-    echo "dependency_report=$DEP_REPORT_FILE"
-    echo "dependency_html_report=$DEP_HTML_REPORT_FILE"
-    echo "scanner=$SCANNER"
-    echo "public_feeds=${PUBLIC_FEEDS:-none}"
-    echo "watch_config=$WATCH_CONFIG"
-    ;;
-  *)
-    echo "Usage: sec-watch [argos|status|lockfiles|defaults-env]" >&2
-    exit 2
-    ;;
-esac
+echo "$SUMMARY"
+echo "project_total=$DEP_COUNT"
+echo "project_critical=$DEP_CRITICAL_COUNT"
+echo "project_high=$DEP_HIGH_COUNT"
+echo "project_medium=$DEP_MEDIUM_COUNT"
+echo "project_low=$DEP_LOW_COUNT"
+echo "project_recent=$DEP_RECENT_COUNT"
+echo "project_recent_critical=$DEP_RECENT_CRITICAL_COUNT"
+echo "project_recent_high=$DEP_RECENT_HIGH_COUNT"
+echo "recent_changes=$RECENT_CHANGE_COUNT"
+echo "dependency_report=$DEP_REPORT_FILE"
+echo "dependency_html_report=$DEP_HTML_REPORT_FILE"
+echo "scanner=$SCANNER"
+echo "public_feeds=${PUBLIC_FEEDS:-none}"
+echo "watch_config=$WATCH_CONFIG"
