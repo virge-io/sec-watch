@@ -8,6 +8,7 @@ DEFAULT_PUBLIC_FEEDS="cisa-kev,nvd-recent"
 DEFAULT_TTL_SECONDS="1800"
 DEFAULT_RECENT_DAYS="7"
 DEFAULT_WATCH_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/sec-watch/watch.json"
+SEC_WATCH_LIB_DIR="$(dirname "$(readlink -f "$0")")/../share/sec-watch"
 
 emit_defaults_env() {
   local projects="$DEFAULT_SELECTED_PROJECTS"
@@ -24,13 +25,15 @@ emit_defaults_env() {
     public_feeds="$SEC_WATCH_PUBLIC_FEEDS"
   fi
 
-  printf 'SEC_WATCH_PROJECTS_DIR=%s\n' "${SEC_WATCH_PROJECTS_DIR:-${PROJECTS_DIR:-$DEFAULT_PROJECTS_DIR}}"
-  printf 'SEC_WATCH_PROJECTS=%s\n' "$projects"
-  printf 'SEC_WATCH_ECOSYSTEMS=%s\n' "$ecosystems"
-  printf 'SEC_WATCH_PUBLIC_FEEDS=%s\n' "$public_feeds"
-  printf 'SEC_WATCH_TTL=%s\n' "${SEC_WATCH_TTL:-$DEFAULT_TTL_SECONDS}"
-  printf 'SEC_WATCH_RECENT_DAYS=%s\n' "${SEC_WATCH_RECENT_DAYS:-$DEFAULT_RECENT_DAYS}"
-  printf 'SEC_WATCH_CONFIG=%s\n' "${SEC_WATCH_CONFIG:-$DEFAULT_WATCH_CONFIG}"
+  cat <<EOF
+SEC_WATCH_PROJECTS_DIR=${SEC_WATCH_PROJECTS_DIR:-${PROJECTS_DIR:-$DEFAULT_PROJECTS_DIR}}
+SEC_WATCH_PROJECTS=$projects
+SEC_WATCH_ECOSYSTEMS=$ecosystems
+SEC_WATCH_PUBLIC_FEEDS=$public_feeds
+SEC_WATCH_TTL=${SEC_WATCH_TTL:-$DEFAULT_TTL_SECONDS}
+SEC_WATCH_RECENT_DAYS=${SEC_WATCH_RECENT_DAYS:-$DEFAULT_RECENT_DAYS}
+SEC_WATCH_CONFIG=${SEC_WATCH_CONFIG:-$DEFAULT_WATCH_CONFIG}
+EOF
 }
 
 if [[ "${1:-}" == "defaults-env" ]]; then
@@ -85,12 +88,66 @@ RECENT_DAYS="${SEC_WATCH_RECENT_DAYS:-$DEFAULT_RECENT_DAYS}"
 CISA_KEV_URL="https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 NVD_RECENT_URL="https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-recent.json.gz"
 
+# Colors for terminal output
+if [[ -t 2 ]]; then
+  C_GRAY="\033[0;90m"
+  C_BLUE="\033[0;34m"
+  C_CYAN="\033[0;36m"
+  C_BOLD="\033[1m"
+  C_RESET="\033[0m"
+else
+  C_GRAY=""
+  C_BLUE=""
+  C_CYAN=""
+  C_BOLD=""
+  C_RESET=""
+fi
+
+emit_vars_q() {
+  for var in "$@"; do
+    printf '%s=%q\n' "$var" "${!var}"
+  done
+}
+
+emit_status_report() {
+  local is_tty="${1:-0}"
+  local p_cyan=""
+  local p_bold=""
+  local p_reset=""
+
+  if [[ "$is_tty" == "1" ]]; then
+    p_cyan="$C_CYAN"
+    p_bold="$C_BOLD"
+    p_reset="$C_RESET"
+    printf "${p_bold}%s${p_reset}\n" "$SUMMARY"
+  else
+    printf '%s\n' "$SUMMARY"
+  fi
+
+  cat <<EOF
+${p_cyan}project_total=${p_reset}$DEP_COUNT
+${p_cyan}project_critical=${p_reset}$DEP_CRITICAL_COUNT
+${p_cyan}project_high=${p_reset}$DEP_HIGH_COUNT
+${p_cyan}project_medium=${p_reset}$DEP_MEDIUM_COUNT
+${p_cyan}project_low=${p_reset}$DEP_LOW_COUNT
+${p_cyan}project_recent=${p_reset}$DEP_RECENT_COUNT
+${p_cyan}project_recent_critical=${p_reset}$DEP_RECENT_CRITICAL_COUNT
+${p_cyan}project_recent_high=${p_reset}$DEP_RECENT_HIGH_COUNT
+${p_cyan}recent_changes=${p_reset}$RECENT_CHANGE_COUNT
+${p_cyan}dependency_report=${p_reset}$DEP_REPORT_FILE
+${p_cyan}dependency_html_report=${p_reset}$DEP_HTML_REPORT_FILE
+${p_cyan}scanner=${p_reset}$SCANNER
+${p_cyan}public_feeds=${p_reset}${PUBLIC_FEEDS:-none}
+${p_cyan}watch_config=${p_reset}$WATCH_CONFIG
+EOF
+}
+
 debug_log() {
   local message="$*"
 
   [[ "${SEC_WATCH_DEBUG:-0}" == "1" ]] || return 0
 
-  printf '[sec-watch] %s\n' "$message" >&2
+  printf "${C_GRAY}[sec-watch]${C_RESET} %s\n" "$message" >&2
   if [[ -n "${SEC_WATCH_DEBUG_FILE:-}" ]]; then
     mkdir -p "$(dirname "$SEC_WATCH_DEBUG_FILE")"
     printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$message" >> "$SEC_WATCH_DEBUG_FILE"
@@ -138,332 +195,64 @@ filter_trivy_json() {
   local json="$1"
 
   printf '%s\n' "$json" |
-    jq --arg ecosystems "$ENABLED_ECOSYSTEMS" --arg ecosystem_filter_set "$ECOSYSTEM_FILTER_SET" --arg projects "$SELECTED_PROJECTS" '
-      def csv_values($value): $value | split(",") | map(select(length > 0));
-
-      csv_values($ecosystems) as $ecosystem_ids
-      | csv_values($projects) as $project_names
-      | .Results = [
-          .Results[]?
-          | select(
-              $ecosystem_filter_set != "1" or
-              (($ecosystem_ids | length) > 0 and (.Type as $type | $ecosystem_ids | index($type)))
-            )
-          | select(
-              ($project_names | length) == 0 or
-              (.Target as $target | ($project_names | map(. as $project | select(($target == $project) or ($target | startswith($project + "/")))) | length) > 0)
-            )
-        ]
-    ' 2>/dev/null || printf '%s\n' "$json"
+    jq --arg ecosystems "$ENABLED_ECOSYSTEMS" \
+       --arg ecosystem_filter_set "$ECOSYSTEM_FILTER_SET" \
+       --arg projects "$SELECTED_PROJECTS" \
+       -f "$SEC_WATCH_LIB_DIR/filter-trivy.jq" 2>/dev/null || printf '%s\n' "$json"
 }
 
 write_trivy_dependency_report() {
   local json="$1"
   local generated
-  local trivy_jq_defs
-
   generated="$(date '+%Y-%m-%d %H:%M:%S')"
-  trivy_jq_defs='
-    def severity_rank($severity):
-      if $severity == "CRITICAL" then 0
-      elif $severity == "HIGH" then 1
-      elif $severity == "MEDIUM" then 2
-      elif $severity == "LOW" then 3
-      else 4 end;
 
-    def metric($vector; $key):
-      (($vector // "" | split("/") | map(select(startswith($key + ":"))) | first) // "" | split(":")[1]) // "";
-
-    def attack_vector_label($code):
-      if $code == "N" then "Network"
-      elif $code == "A" then "Adjacent"
-      elif $code == "L" then "Local"
-      elif $code == "P" then "Physical"
-      else "-" end;
-
-    def attack_vector_rank($code):
-      if $code == "N" then 0
-      elif $code == "A" then 1
-      elif $code == "L" then 2
-      elif $code == "P" then 3
-      else 9 end;
-
-    def complexity_label($code):
-      if $code == "L" then "Low"
-      elif $code == "M" then "Medium"
-      elif $code == "H" then "High"
-      else "-" end;
-
-    def complexity_rank($code):
-      if $code == "L" then 0
-      elif $code == "M" then 1
-      elif $code == "H" then 2
-      else 9 end;
-
-    def privilege_label($code):
-      if $code == "N" then "None"
-      elif $code == "L" then "Low"
-      elif $code == "H" then "High"
-      else "-" end;
-
-    def privilege_rank($code):
-      if $code == "N" then 0
-      elif $code == "L" then 1
-      elif $code == "H" then 2
-      else 9 end;
-
-    def authentication_label($code):
-      if $code == "N" then "Auth: None"
-      elif $code == "S" then "Auth: Single"
-      elif $code == "M" then "Auth: Multiple"
-      else "-" end;
-
-    def authentication_rank($code):
-      if $code == "N" then 0
-      elif $code == "S" then 1
-      elif $code == "M" then 2
-      else 9 end;
-
-    def interaction_label($code):
-      if $code == "N" then "None"
-      elif $code == "R" then "Required"
-      elif $code == "P" then "Passive"
-      elif $code == "A" then "Active"
-      else "-" end;
-
-    def interaction_rank($code):
-      if $code == "N" then 0
-      elif $code == "P" then 1
-      elif $code == "R" then 2
-      elif $code == "A" then 3
-      else 9 end;
-
-    def cvss_entry:
-      (.CVSS // {}
-        | to_entries
-        | map({
-            source: .key,
-            score: ((.value.V4Score // .value.V3Score // .value.V2Score // 0) | tonumber? // 0),
-            vector: (.value.V4Vector // .value.V3Vector // .value.V2Vector // "")
-          })
-        | sort_by(.score)
-        | reverse
-        | first) // {source: "", score: -1, vector: ""};
-
-    def cvss_summary:
-      cvss_entry as $cvss
-      | ($cvss.vector // "") as $vector
-      | metric($vector; "AV") as $attack_vector
-      | metric($vector; "AC") as $complexity
-      | metric($vector; "PR") as $privileges
-      | metric($vector; "Au") as $authentication
-      | metric($vector; "UI") as $interaction
-      | {
-          score: (if ($cvss.score // -1) >= 0 then ($cvss.score | tostring) else "-" end),
-          score_sort: ($cvss.score // -1),
-          vector: (if $vector != "" then $vector else "-" end),
-          attack_vector: attack_vector_label($attack_vector),
-          attack_vector_rank: attack_vector_rank($attack_vector),
-          attack_complexity: complexity_label($complexity),
-          attack_complexity_rank: complexity_rank($complexity),
-          privileges: (if $privileges != "" then privilege_label($privileges) else authentication_label($authentication) end),
-          privileges_rank: (if $privileges != "" then privilege_rank($privileges) else authentication_rank($authentication) end),
-          user_interaction: interaction_label($interaction),
-          user_interaction_rank: interaction_rank($interaction)
-        };
-
-    def finding($target):
-      cvss_summary as $cvss
-      | {
-          rank: severity_rank(.Severity),
-          severity: .Severity,
-          package: .PkgName,
-          installed: (.InstalledVersion // "-"),
-          fixed: (.FixedVersion // "-"),
-          target: $target,
-          id: .VulnerabilityID,
-          url: (.PrimaryURL // ""),
-          title: ((.Title // .Description // "") | gsub("[\t\r\n]+"; " ")),
-          cvss_score: $cvss.score,
-          cvss_score_sort: $cvss.score_sort,
-          cvss_vector: $cvss.vector,
-          attack_vector: $cvss.attack_vector,
-          attack_vector_rank: $cvss.attack_vector_rank,
-          attack_complexity: $cvss.attack_complexity,
-          attack_complexity_rank: $cvss.attack_complexity_rank,
-          privileges: $cvss.privileges,
-          privileges_rank: $cvss.privileges_rank,
-          user_interaction: $cvss.user_interaction,
-          user_interaction_rank: $cvss.user_interaction_rank
-        };
-  '
-
+  # Text report
   {
-    printf 'Security dependency report\n'
-    printf 'Generated: %s\n' "$generated"
-    printf 'Projects: %s\n' "$PROJECTS_DIR"
-    printf 'Scanner: trivy\n'
-    printf '\n'
-    printf 'Summary\n'
-    printf 'Critical: %s\n' "$DEP_CRITICAL_COUNT"
-    printf 'High: %s\n' "$DEP_HIGH_COUNT"
-    printf 'Medium: %s\n' "$DEP_MEDIUM_COUNT"
-    printf 'Low: %s\n' "$DEP_LOW_COUNT"
-    printf 'Total: %s\n' "$DEP_COUNT"
-    printf 'Recent high/critical changes (%s days): %s\n' "$RECENT_DAYS" "$DEP_RECENT_COUNT"
-    printf '\n'
-    printf 'Recent high/critical changes\n'
+    cat <<EOF
+Security dependency report
+Generated: $generated
+Projects: $PROJECTS_DIR
+Scanner: trivy
+
+Summary
+Critical: $DEP_CRITICAL_COUNT
+High: $DEP_HIGH_COUNT
+Medium: $DEP_MEDIUM_COUNT
+Low: $DEP_LOW_COUNT
+Total: $DEP_COUNT
+Recent high/critical changes ($RECENT_DAYS days): $DEP_RECENT_COUNT
+
+Recent high/critical changes
+EOF
     if [[ "${DEP_RECENT_COUNT:-0}" -eq 0 ]]; then
       printf 'No recent high/critical changes in the last %s days.\n' "$RECENT_DAYS"
     else
-      printf '%s\n' "$json" |
-        jq -r --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" "${trivy_jq_defs}"'
-          def block:
-            "\( .key + 1 ). \(.value.severity) \(.value.id) (CVSS \(.value.cvss_score))\n"
-            + "   Package: \(.value.package) \(.value.installed) -> \(.value.fixed)\n"
-            + "   Target: \(.value.target)\n"
-            + "   Changed: \(.value.changed)\n"
-            + "   Attack: vector=\(.value.attack_vector), complexity=\(.value.attack_complexity), privileges=\(.value.privileges), user_action=\(.value.user_interaction)\n"
-            + "   Title: \(.value.title | .[0:220])\n"
-            + (if .value.url != "" then "   URL: \(.value.url)\n" else "" end);
-
-          [.Results[]?
-            | .Target as $target
-            | .Vulnerabilities[]?
-            | select(.Severity == "CRITICAL" or .Severity == "HIGH")
-            | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)
-            | finding($target) + {changed: ((.LastModifiedDate // .PublishedDate // "-")[0:10])}]
-          | sort_by(.changed, .rank, .package, .id)
-          | reverse
-          | to_entries[]
-          | block
-        ' 2>/dev/null
+      printf '%s\n' "$json" | jq -r --arg mode "recent" --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" \
+        -L "$SEC_WATCH_LIB_DIR" 'import "trivy-defs" as trivy; trivy::finding(null) as $dummy | include "trivy-text-report"' 2>/dev/null
     fi
-    printf '\n'
-    printf 'All findings\n'
+
+    printf '\nAll findings\n'
     if [[ "${DEP_COUNT:-0}" -eq 0 ]]; then
       printf 'No dependency vulnerabilities found.\n'
     else
-      printf '%s\n' "$json" |
-        jq -r "${trivy_jq_defs}"'
-          def block:
-            "\( .key + 1 ). \(.value.severity) \(.value.id) (CVSS \(.value.cvss_score))\n"
-            + "   Package: \(.value.package) \(.value.installed) -> \(.value.fixed)\n"
-            + "   Target: \(.value.target)\n"
-            + "   Attack: vector=\(.value.attack_vector), complexity=\(.value.attack_complexity), privileges=\(.value.privileges), user_action=\(.value.user_interaction)\n"
-            + "   Title: \(.value.title | .[0:220])\n"
-            + (if .value.url != "" then "   URL: \(.value.url)\n" else "" end);
-
-          [.Results[]?
-            | .Target as $target
-            | .Vulnerabilities[]?
-            | finding($target)]
-          | sort_by(.rank, .package, .id)
-          | to_entries[]
-          | block
-        ' 2>/dev/null
+      printf '%s\n' "$json" | jq -r --arg mode "all" \
+        -L "$SEC_WATCH_LIB_DIR" 'import "trivy-defs" as trivy; trivy::finding(null) as $dummy | include "trivy-text-report"' 2>/dev/null
     fi
     printf '\nTip: jless %s\n' "$DEP_JSON_FILE"
   } > "$DEP_REPORT_FILE"
 
-  {
-    printf '%s\n' '<!doctype html>'
-    printf '%s\n' '<html lang="en"><head><meta charset="utf-8">'
-    printf '%s\n' '<title>Security Dependency Report</title>'
-    printf '%s\n' '<style>'
-    printf '%s\n' 'body{font:14px system-ui,sans-serif;margin:24px;color:#202124;background:#fff;}'
-    printf '%s\n' 'h1{font-size:22px;margin:0 0 8px;} h2{font-size:18px;margin-top:28px;}'
-    printf '%s\n' '.meta{color:#5f6368;margin-bottom:18px;} .summary{display:flex;gap:10px;flex-wrap:wrap;margin:16px 0;}'
-    printf '%s\n' '.pill{border:1px solid #dadce0;border-radius:6px;padding:6px 10px;background:#f8f9fa;}'
-    printf '%s\n' '.table-wrap{overflow-x:auto;margin-bottom:8px;} table{border-collapse:collapse;width:2400px;max-width:none;table-layout:fixed;} th,td{border-bottom:1px solid #e0e0e0;padding:6px 8px;text-align:left;vertical-align:top;}'
-    printf '%s\n' 'th{position:sticky;top:0;background:#f8f9fa;z-index:1;} th[data-sort]{cursor:pointer;user-select:none;} th[aria-sort="ascending"]::after{content:" ^";color:#5f6368;} th[aria-sort="descending"]::after{content:" v";color:#5f6368;} td{word-break:break-word;} .num{width:48px;color:#5f6368;text-align:right;}'
-    printf '%s\n' '.sev-CRITICAL{color:#b00020;font-weight:700;} .sev-HIGH{color:#d84315;font-weight:700;}'
-    printf '%s\n' '.fixed{width:120px}.version{width:100px}.date{width:100px}.vuln{width:145px}.severity{width:90px}.score{width:70px}.attack{width:110px}.complexity{width:95px}.privileges{width:105px}.interaction{width:105px}.target{width:230px}.package{width:145px}.title{width:520px}'
-    printf '%s\n' '</style></head><body>'
-    printf '<h1>%s</h1>\n' 'Security Dependency Report'
-    printf '<div class="meta">Generated: %s<br>Projects: %s<br>Scanner: trivy</div>\n' "$generated" "$PROJECTS_DIR"
-    printf '%s\n' '<div class="summary">'
-    printf '<div class="pill">Critical: %s</div>\n' "$DEP_CRITICAL_COUNT"
-    printf '<div class="pill">High: %s</div>\n' "$DEP_HIGH_COUNT"
-    printf '<div class="pill">Medium: %s</div>\n' "$DEP_MEDIUM_COUNT"
-    printf '<div class="pill">Low: %s</div>\n' "$DEP_LOW_COUNT"
-    printf '<div class="pill">Total: %s</div>\n' "$DEP_COUNT"
-    printf '<div class="pill">Recent high/critical changes: %s</div>\n' "$DEP_RECENT_COUNT"
-    printf '%s\n' '</div>'
-    printf '%s\n' '<h2>Recent High/Critical Changes</h2>'
-    printf '%s\n' '<div class="table-wrap"><table class="sortable"><thead><tr><th class="num" data-sort="number">#</th><th class="severity" data-sort="number">Severity</th><th class="date" data-sort="text">Changed</th><th class="score" data-sort="number">CVSS</th><th class="attack" data-sort="number">Attack vector</th><th class="complexity" data-sort="number">Complexity</th><th class="privileges" data-sort="number">Privileges</th><th class="interaction" data-sort="number">User action</th><th class="package" data-sort="text">Package</th><th class="version" data-sort="text">Installed</th><th class="fixed" data-sort="text">Fixed</th><th class="target" data-sort="text">Target</th><th class="vuln" data-sort="text">Vulnerability</th><th class="title" data-sort="text">Title</th></tr></thead><tbody>'
-    printf '%s\n' "$json" |
-      jq -r --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" "${trivy_jq_defs}"'
-        def esc: tostring | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\""; "&quot;");
-        [.Results[]?
-          | .Target as $target
-          | .Vulnerabilities[]?
-          | select(.Severity == "CRITICAL" or .Severity == "HIGH")
-          | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)
-          | finding($target) + {changed: ((.LastModifiedDate // .PublishedDate // "-")[0:10])}]
-        | sort_by(.changed, .rank, .package, .id)
-        | reverse
-        | to_entries[]
-        | "<tr><td class=\"num\" data-sort-value=\"\(.key + 1)\">\(.key + 1)</td><td class=\"sev-\(.value.severity)\" data-sort-value=\"\(.value.rank)\">\(.value.severity | esc)</td><td class=\"date\" data-sort-value=\"\(.value.changed | esc)\">\(.value.changed | esc)</td><td class=\"score\" data-sort-value=\"\(.value.cvss_score_sort)\"><span title=\"\(.value.cvss_vector | esc)\">\(.value.cvss_score | esc)</span></td><td class=\"attack\" data-sort-value=\"\(.value.attack_vector_rank)\">\(.value.attack_vector | esc)</td><td class=\"complexity\" data-sort-value=\"\(.value.attack_complexity_rank)\">\(.value.attack_complexity | esc)</td><td class=\"privileges\" data-sort-value=\"\(.value.privileges_rank)\">\(.value.privileges | esc)</td><td class=\"interaction\" data-sort-value=\"\(.value.user_interaction_rank)\">\(.value.user_interaction | esc)</td><td>\(.value.package | esc)</td><td>\(.value.installed | esc)</td><td>\(.value.fixed | esc)</td><td>\(.value.target | esc)</td><td><a href=\"\(.value.url | esc)\">\(.value.id | esc)</a></td><td class=\"title\">\(.value.title | esc)</td></tr>"
-      ' 2>/dev/null
-    printf '%s\n' '</tbody></table></div>'
-    printf '%s\n' '<h2>All Findings</h2>'
-    printf '%s\n' '<div class="table-wrap"><table class="sortable"><thead><tr><th class="num" data-sort="number">#</th><th class="severity" data-sort="number">Severity</th><th class="score" data-sort="number">CVSS</th><th class="attack" data-sort="number">Attack vector</th><th class="complexity" data-sort="number">Complexity</th><th class="privileges" data-sort="number">Privileges</th><th class="interaction" data-sort="number">User action</th><th class="package" data-sort="text">Package</th><th class="version" data-sort="text">Installed</th><th class="fixed" data-sort="text">Fixed</th><th class="target" data-sort="text">Target</th><th class="vuln" data-sort="text">Vulnerability</th><th class="title" data-sort="text">Title</th></tr></thead><tbody>'
-    printf '%s\n' "$json" |
-      jq -r "${trivy_jq_defs}"'
-        def esc: tostring | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\""; "&quot;");
-        [.Results[]?
-          | .Target as $target
-          | .Vulnerabilities[]?
-          | finding($target)]
-        | sort_by(.rank, .package, .id)
-        | to_entries[]
-        | "<tr><td class=\"num\" data-sort-value=\"\(.key + 1)\">\(.key + 1)</td><td class=\"sev-\(.value.severity)\" data-sort-value=\"\(.value.rank)\">\(.value.severity | esc)</td><td class=\"score\" data-sort-value=\"\(.value.cvss_score_sort)\"><span title=\"\(.value.cvss_vector | esc)\">\(.value.cvss_score | esc)</span></td><td class=\"attack\" data-sort-value=\"\(.value.attack_vector_rank)\">\(.value.attack_vector | esc)</td><td class=\"complexity\" data-sort-value=\"\(.value.attack_complexity_rank)\">\(.value.attack_complexity | esc)</td><td class=\"privileges\" data-sort-value=\"\(.value.privileges_rank)\">\(.value.privileges | esc)</td><td class=\"interaction\" data-sort-value=\"\(.value.user_interaction_rank)\">\(.value.user_interaction | esc)</td><td>\(.value.package | esc)</td><td>\(.value.installed | esc)</td><td>\(.value.fixed | esc)</td><td>\(.value.target | esc)</td><td><a href=\"\(.value.url | esc)\">\(.value.id | esc)</a></td><td class=\"title\">\(.value.title | esc)</td></tr>"
-      ' 2>/dev/null
-    printf '%s\n' '</tbody></table></div>'
-    printf '%s\n' '<script>'
-    printf '%s\n' '(() => {'
-    printf '%s\n' '  const cellValue = (row, index) => row.children[index]?.dataset.sortValue ?? row.children[index]?.textContent.trim() ?? "";'
-    printf '%s\n' '  const coerce = (value, type) => {'
-    printf '%s\n' '    if (type === "number") {'
-    printf '%s\n' '      const number = Number.parseFloat(value);'
-    printf '%s\n' '      return Number.isNaN(number) ? -1 : number;'
-    printf '%s\n' '    }'
-    printf '%s\n' '    return value.toLocaleLowerCase();'
-    printf '%s\n' '  };'
-    printf '%s\n' '  document.querySelectorAll("table.sortable").forEach(table => {'
-    printf '%s\n' '    table.querySelectorAll("th[data-sort]").forEach((th, index) => {'
-    printf '%s\n' '      th.tabIndex = 0;'
-    printf '%s\n' '      const sort = () => {'
-    printf '%s\n' '        const tbody = table.tBodies[0];'
-    printf '%s\n' '        const direction = th.dataset.direction === "asc" ? "desc" : "asc";'
-    printf '%s\n' '        const multiplier = direction === "asc" ? 1 : -1;'
-    printf '%s\n' '        const type = th.dataset.sort || "text";'
-    printf '%s\n' '        const rows = Array.from(tbody.rows);'
-    printf '%s\n' '        rows.sort((left, right) => {'
-    printf '%s\n' '          const a = coerce(cellValue(left, index), type);'
-    printf '%s\n' '          const b = coerce(cellValue(right, index), type);'
-    printf '%s\n' '          if (a < b) return -1 * multiplier;'
-    printf '%s\n' '          if (a > b) return 1 * multiplier;'
-    printf '%s\n' '          return 0;'
-    printf '%s\n' '        });'
-    printf '%s\n' '        rows.forEach(row => tbody.appendChild(row));'
-    printf '%s\n' '        table.querySelectorAll("th[aria-sort]").forEach(header => header.removeAttribute("aria-sort"));'
-    printf '%s\n' '        th.dataset.direction = direction;'
-    printf '%s\n' '        th.setAttribute("aria-sort", direction === "asc" ? "ascending" : "descending");'
-    printf '%s\n' '      };'
-    printf '%s\n' '      th.addEventListener("click", sort);'
-    printf '%s\n' '      th.addEventListener("keydown", event => {'
-    printf '%s\n' '        if (event.key === "Enter" || event.key === " ") {'
-    printf '%s\n' '          event.preventDefault();'
-    printf '%s\n' '          sort();'
-    printf '%s\n' '        }'
-    printf '%s\n' '      });'
-    printf '%s\n' '    });'
-    printf '%s\n' '  });'
-    printf '%s\n' '})();'
-    printf '%s\n' '</script></body></html>'
-  } > "$DEP_HTML_REPORT_FILE"
+  # HTML report
+  printf '%s\n' "$json" | jq -r \
+    --arg generated "$generated" \
+    --arg projects_dir "$PROJECTS_DIR" \
+    --arg critical_count "$DEP_CRITICAL_COUNT" \
+    --arg high_count "$DEP_HIGH_COUNT" \
+    --arg medium_count "$DEP_MEDIUM_COUNT" \
+    --arg low_count "$DEP_LOW_COUNT" \
+    --arg total_count "$DEP_COUNT" \
+    --arg recent_count "$DEP_RECENT_COUNT" \
+    --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" \
+    -L "$SEC_WATCH_LIB_DIR" 'import "trivy-defs" as trivy; trivy::finding(null) as $dummy | include "trivy-html-report"' 2>/dev/null > "$DEP_HTML_REPORT_FILE"
 }
 
 if [[ "${SEC_WATCH_FORCE:-0}" != "1" && -n "${UPDATED_AT:-}" && $((now - UPDATED_AT)) -lt "$TTL_SECONDS" ]]; then
@@ -546,22 +335,23 @@ else
       write_trivy_dependency_report "$dep_json"
     elif [[ "$SCANNER" != "none" ]]; then
       debug_log "writing generic dependency report"
-      {
-        printf 'Security dependency report\n'
-        printf 'Generated: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-        printf 'Projects: %s\n' "$PROJECTS_DIR"
-        printf 'Scanner: %s\n' "$SCANNER"
-        printf '\n'
-        printf 'Summary\n'
-        printf 'Critical: %s\n' "$DEP_CRITICAL_COUNT"
-        printf 'High: %s\n' "$DEP_HIGH_COUNT"
-        printf 'Medium: %s\n' "$DEP_MEDIUM_COUNT"
-        printf 'Low: %s\n' "$DEP_LOW_COUNT"
-        printf 'Total: %s\n' "$DEP_COUNT"
-        printf '\n'
-        printf 'Raw JSON: %s\n' "$DEP_JSON_FILE"
-        printf '\nTip: jless %s\n' "$DEP_JSON_FILE"
-      } > "$DEP_REPORT_FILE"
+      cat <<EOF > "$DEP_REPORT_FILE"
+Security dependency report
+Generated: $(date '+%Y-%m-%d %H:%M:%S')
+Projects: $PROJECTS_DIR
+Scanner: $SCANNER
+
+Summary
+Critical: $DEP_CRITICAL_COUNT
+High: $DEP_HIGH_COUNT
+Medium: $DEP_MEDIUM_COUNT
+Low: $DEP_LOW_COUNT
+Total: $DEP_COUNT
+
+Raw JSON: $DEP_JSON_FILE
+
+Tip: jless $DEP_JSON_FILE
+EOF
     fi
   else
     debug_log "projects directory does not exist: $PROJECTS_DIR"
@@ -644,44 +434,20 @@ else
   UPDATED_AT="$now"
   SUMMARY="Projects high/critical: $DEP_HIGH_CRITICAL_COUNT, Watch: $WATCH_COUNT, Recent: $RECENT_CHANGE_COUNT"
   debug_log "scan summary: $SUMMARY"
-  {
-    printf 'UPDATED_AT=%q\n' "$UPDATED_AT"
-    printf 'DEP_COUNT=%q\n' "$DEP_COUNT"
-    printf 'DEP_HIGH_CRITICAL_COUNT=%q\n' "$DEP_HIGH_CRITICAL_COUNT"
-    printf 'DEP_CRITICAL_COUNT=%q\n' "$DEP_CRITICAL_COUNT"
-    printf 'DEP_HIGH_COUNT=%q\n' "$DEP_HIGH_COUNT"
-    printf 'DEP_MEDIUM_COUNT=%q\n' "$DEP_MEDIUM_COUNT"
-    printf 'DEP_LOW_COUNT=%q\n' "$DEP_LOW_COUNT"
-    printf 'DEP_RECENT_COUNT=%q\n' "$DEP_RECENT_COUNT"
-    printf 'DEP_RECENT_CRITICAL_COUNT=%q\n' "$DEP_RECENT_CRITICAL_COUNT"
-    printf 'DEP_RECENT_HIGH_COUNT=%q\n' "$DEP_RECENT_HIGH_COUNT"
-    printf 'DEP_REPORT_FILE=%q\n' "$DEP_REPORT_FILE"
-    printf 'DEP_HTML_REPORT_FILE=%q\n' "$DEP_HTML_REPORT_FILE"
-    printf 'WATCH_COUNT=%q\n' "$WATCH_COUNT"
-    printf 'CISA_KEV_COUNT=%q\n' "$CISA_KEV_COUNT"
-    printf 'CISA_KEV_RECENT_COUNT=%q\n' "$CISA_KEV_RECENT_COUNT"
-    printf 'NVD_RECENT_COUNT=%q\n' "$NVD_RECENT_COUNT"
-    printf 'RECENT_CHANGE_COUNT=%q\n' "$RECENT_CHANGE_COUNT"
-    printf 'SCANNER=%q\n' "$SCANNER"
-    printf 'SUMMARY=%q\n' "$SUMMARY"
-  } > "$CACHE_FILE"
+  emit_vars_q \
+    UPDATED_AT DEP_COUNT DEP_HIGH_CRITICAL_COUNT DEP_CRITICAL_COUNT \
+    DEP_HIGH_COUNT DEP_MEDIUM_COUNT DEP_LOW_COUNT DEP_RECENT_COUNT \
+    DEP_RECENT_CRITICAL_COUNT DEP_RECENT_HIGH_COUNT DEP_REPORT_FILE \
+    DEP_HTML_REPORT_FILE WATCH_COUNT CISA_KEV_COUNT CISA_KEV_RECENT_COUNT \
+    NVD_RECENT_COUNT RECENT_CHANGE_COUNT SCANNER SUMMARY > "$CACHE_FILE"
 fi
 
 DEP_HIGH_CRITICAL_COUNT=$((DEP_CRITICAL_COUNT + DEP_HIGH_COUNT))
 SUMMARY="Projects high/critical: $DEP_HIGH_CRITICAL_COUNT, Watch: $WATCH_COUNT, Recent: $RECENT_CHANGE_COUNT"
 
-echo "$SUMMARY"
-echo "project_total=$DEP_COUNT"
-echo "project_critical=$DEP_CRITICAL_COUNT"
-echo "project_high=$DEP_HIGH_COUNT"
-echo "project_medium=$DEP_MEDIUM_COUNT"
-echo "project_low=$DEP_LOW_COUNT"
-echo "project_recent=$DEP_RECENT_COUNT"
-echo "project_recent_critical=$DEP_RECENT_CRITICAL_COUNT"
-echo "project_recent_high=$DEP_RECENT_HIGH_COUNT"
-echo "recent_changes=$RECENT_CHANGE_COUNT"
-echo "dependency_report=$DEP_REPORT_FILE"
-echo "dependency_html_report=$DEP_HTML_REPORT_FILE"
-echo "scanner=$SCANNER"
-echo "public_feeds=${PUBLIC_FEEDS:-none}"
-echo "watch_config=$WATCH_CONFIG"
+# Final output
+if [[ -t 1 ]]; then
+  emit_status_report 1
+else
+  emit_status_report 0
+fi
