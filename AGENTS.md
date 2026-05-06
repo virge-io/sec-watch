@@ -28,11 +28,10 @@ lives at `${XDG_CONFIG_HOME:-$HOME/.config}/sec-watch/watch.json`.
 
 ## Testing Notes
 
-- `bin/sec-watch` may call `dnf5`, `dnf`, `trivy`, `osv-scanner`, `curl`, `gzip`, and `jq` depending on the environment and selected feeds.
+- `bin/sec-watch` may call `trivy`, `osv-scanner`, `curl`, `gzip`, and `jq` depending on the environment and selected feeds.
 - To avoid touching the real user cache while testing the helper, set a temporary `XDG_CACHE_HOME` and usually `SEC_WATCH_FORCE=1`.
 - The helper accepts `status` and `defaults-env`. Unknown commands should exit with status `2`.
 - Network-backed feed checks are best treated as integration behavior; keep local validation focused on syntax and deterministic parsing/filtering changes.
-- Use `SEC_WATCH_OS_TIMEOUT` to keep Fedora advisory checks bounded in smoke tests.
 
 ## Conventions
 

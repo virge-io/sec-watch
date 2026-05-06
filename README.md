@@ -1,11 +1,10 @@
 # Security Watch CLI
 
-Security Watch CLI scans local project files for security signals on Fedora
+Security Watch CLI scans local project files for security signals on Linux
 workstations.
 
 It reports:
 
-- Fedora security advisories from `dnf5 advisory` or `dnf updateinfo`
 - local project dependency vulnerabilities from Trivy or OSV Scanner
 - optional public watch-feed matches from manual CVEs, CISA KEV, and NVD Recent
 
@@ -13,13 +12,12 @@ It reports:
 
 - Python 3.10 or newer
 - Bash, `jq`, `curl`, and `gzip`
-- `dnf5` or `dnf` for Fedora OS advisories
 - `trivy` or `osv-scanner` for dependency scanning
 
-Install the common Fedora runtime packages:
+Install these runtime packages with your system package manager:
 
-```bash
-sudo dnf install trivy jq curl
+```text
+trivy jq curl
 ```
 
 ## Usage
@@ -71,8 +69,6 @@ Default values:
 - `SEC_WATCH_ECOSYSTEMS=npm,yarn,pnpm,pip,poetry,uv,python-pkg`
 - `SEC_WATCH_PUBLIC_FEEDS=manual,cisa-kev,nvd-recent`
 - `SEC_WATCH_RECENT_DAYS=7`
-- `SEC_WATCH_OS_ADVISORIES=1`
-- `SEC_WATCH_OS_TIMEOUT=60`
 - `SEC_WATCH_CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/sec-watch/watch.json`
 
 Every `SEC_WATCH_*` value can be overridden in the environment. The local CLI
@@ -81,8 +77,8 @@ also accepts matching flags or `SEC_WATCH_LOCAL_*` overrides:
 ```bash
 SEC_WATCH_PROJECTS_DIR=~/Code bin/sec-watch-local
 SEC_WATCH_LOCAL_ECOSYSTEMS=npm,pip bin/sec-watch-local
-bin/sec-watch-local --public-feeds '' --no-os-advisories
-SEC_WATCH_OS_TIMEOUT=15 bin/sec-watch-local --debug
+bin/sec-watch-local --public-feeds ''
+bin/sec-watch-local --debug
 ```
 
 Manual watch entries and public-feed keywords live in:
@@ -113,9 +109,10 @@ dependency-report.txt
 dependency-report.json
 ```
 
-Trivy reports include CVSS score, attack vector, attack complexity, privileges,
-and user interaction columns. The HTML tables can be sorted by clicking column
-headers.
+`dependency-report.txt` is formatted for terminal reading with short finding
+blocks. Trivy reports include CVSS score, attack vector, attack complexity,
+privileges, and user interaction. The HTML tables can be sorted by clicking
+column headers.
 
 ## Development
 

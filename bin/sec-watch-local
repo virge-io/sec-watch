@@ -220,10 +220,6 @@ def parse_status(stdout: str) -> dict[str, str]:
     return status
 
 
-def bool_from_env(value: str) -> bool:
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def scanner_overrides_from_args(args: argparse.Namespace) -> dict[str, str]:
     overrides = {}
 
@@ -233,12 +229,6 @@ def scanner_overrides_from_args(args: argparse.Namespace) -> dict[str, str]:
         overrides["SEC_WATCH_PUBLIC_FEEDS"] = args.public_feeds
     if args.recent_days is not None:
         overrides["SEC_WATCH_RECENT_DAYS"] = str(args.recent_days)
-
-    os_advisories = args.os_advisories
-    if os_advisories is None and "SEC_WATCH_LOCAL_OS_ADVISORIES" in os.environ:
-        os_advisories = bool_from_env(os.environ["SEC_WATCH_LOCAL_OS_ADVISORIES"])
-    if os_advisories is not None:
-        overrides["SEC_WATCH_OS_ADVISORIES"] = "1" if os_advisories else "0"
 
     return overrides
 
@@ -267,8 +257,6 @@ def run_scanner(args: argparse.Namespace, scan_path: Path, run_cache_dir: Path) 
         debug(args, f"XDG_CACHE_HOME={env['XDG_CACHE_HOME']}")
 
     progress(args, f"Running scanner on {scan_path}")
-    if env.get("SEC_WATCH_OS_ADVISORIES") != "0":
-        progress(args, "Fedora advisory checks are enabled; this can take a while")
     if env.get("SEC_WATCH_PUBLIC_FEEDS"):
         progress(args, f"Public feeds enabled: {env['SEC_WATCH_PUBLIC_FEEDS']}")
     progress(args, f"Dependency ecosystems: {env.get('SEC_WATCH_ECOSYSTEMS') or 'all'}")
@@ -312,7 +300,7 @@ def print_human(data: dict[str, Any]) -> None:
     print(f"Medium: {data['project_medium'] or 0}")
     print(f"Low: {data['project_low'] or 0}")
     print(f"HTML report: {data['dependency_html_report'] or '-'}")
-    print(f"Text report: {data['dependency_report'] or '-'}")
+    print(f"CLI report: {data['dependency_report'] or '-'}")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -324,7 +312,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--ecosystems", default=os.environ.get("SEC_WATCH_LOCAL_ECOSYSTEMS"), help="Comma-separated dependency ecosystem filter, for example npm,pip,poetry.")
     parser.add_argument("--public-feeds", default=os.environ.get("SEC_WATCH_LOCAL_PUBLIC_FEEDS"), help="Comma-separated public feed list. Use an empty value to disable feeds.")
     parser.add_argument("--recent-days", type=int, default=int(os.environ["SEC_WATCH_LOCAL_RECENT_DAYS"]) if "SEC_WATCH_LOCAL_RECENT_DAYS" in os.environ else None, help="Lookback window for recent dependency changes.")
-    parser.add_argument("--os-advisories", action=argparse.BooleanOptionalAction, default=None, help="Include Fedora OS advisory checks.")
     parser.add_argument("--git-timeout", type=int, default=int(os.environ.get("SEC_WATCH_LOCAL_GIT_TIMEOUT", "300")))
     parser.add_argument("--scan-timeout", type=int, default=int(os.environ.get("SEC_WATCH_LOCAL_SCAN_TIMEOUT", "1800")))
     parser.add_argument("--progress-interval", type=int, default=int(os.environ.get("SEC_WATCH_LOCAL_PROGRESS_INTERVAL", "10")), help="Seconds between progress updates.")

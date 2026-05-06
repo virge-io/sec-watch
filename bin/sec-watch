@@ -7,8 +7,6 @@ DEFAULT_ECOSYSTEMS="npm,yarn,pnpm,pip,poetry,uv,python-pkg"
 DEFAULT_PUBLIC_FEEDS="manual,cisa-kev,nvd-recent"
 DEFAULT_TTL_SECONDS="1800"
 DEFAULT_RECENT_DAYS="7"
-DEFAULT_OS_ADVISORIES="1"
-DEFAULT_OS_TIMEOUT="60"
 DEFAULT_WATCH_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/sec-watch/watch.json"
 
 emit_defaults_env() {
@@ -32,8 +30,6 @@ emit_defaults_env() {
   printf 'SEC_WATCH_PUBLIC_FEEDS=%s\n' "$public_feeds"
   printf 'SEC_WATCH_TTL=%s\n' "${SEC_WATCH_TTL:-$DEFAULT_TTL_SECONDS}"
   printf 'SEC_WATCH_RECENT_DAYS=%s\n' "${SEC_WATCH_RECENT_DAYS:-$DEFAULT_RECENT_DAYS}"
-  printf 'SEC_WATCH_OS_ADVISORIES=%s\n' "${SEC_WATCH_OS_ADVISORIES:-$DEFAULT_OS_ADVISORIES}"
-  printf 'SEC_WATCH_OS_TIMEOUT=%s\n' "${SEC_WATCH_OS_TIMEOUT:-$DEFAULT_OS_TIMEOUT}"
   printf 'SEC_WATCH_CONFIG=%s\n' "${SEC_WATCH_CONFIG:-$DEFAULT_WATCH_CONFIG}"
 }
 
@@ -86,21 +82,8 @@ DEP_JSON_FILE="$CACHE_DIR/dependency-report.json"
 WATCH_CONFIG="${SEC_WATCH_CONFIG:-$DEFAULT_WATCH_CONFIG}"
 TTL_SECONDS="${SEC_WATCH_TTL:-$DEFAULT_TTL_SECONDS}"
 RECENT_DAYS="${SEC_WATCH_RECENT_DAYS:-$DEFAULT_RECENT_DAYS}"
-OS_ADVISORIES="${SEC_WATCH_OS_ADVISORIES:-$DEFAULT_OS_ADVISORIES}"
-OS_TIMEOUT="${SEC_WATCH_OS_TIMEOUT:-$DEFAULT_OS_TIMEOUT}"
 CISA_KEV_URL="https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 NVD_RECENT_URL="https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-recent.json.gz"
-
-run_with_timeout() {
-  local seconds="$1"
-  shift
-
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$seconds" "$@"
-  else
-    "$@"
-  fi
-}
 
 debug_log() {
   local message="$*"
@@ -156,17 +139,7 @@ count_manual_watch_cves() {
     return
   }
 
-  jq -r '.manual_cves // [] | .[].id' "$WATCH_CONFIG" 2>/dev/null |
-    while read -r cve; do
-      [[ -n "$cve" ]] || continue
-      if command -v dnf5 >/dev/null 2>&1 &&
-        ! run_with_timeout "$OS_TIMEOUT" dnf5 advisory list --all --security --with-cve --cves="$cve" 2>/dev/null | grep -q 'No advisory found'; then
-        printf '%s\n' "$cve"
-      else
-        printf '%s\n' "$cve"
-      fi
-    done |
-    awk 'NF {count++} END {print count + 0}'
+  jq_count '.manual_cves // [] | map(select(.id // "" | length > 0)) | length' "$WATCH_CONFIG"
 }
 
 count_cisa_kev_matches() {
@@ -405,51 +378,57 @@ write_trivy_dependency_report() {
     printf 'Total: %s\n' "$DEP_COUNT"
     printf 'Recent high/critical changes (%s days): %s\n' "$RECENT_DAYS" "$DEP_RECENT_COUNT"
     printf '\n'
-    printf 'Recent important changes\n'
-    printf '#\tSeverity\tChanged\tCVSS\tAttack vector\tComplexity\tPrivileges\tUser action\tPackage\tInstalled\tFixed\tTarget\tVulnerability\tTitle\n'
-    printf '%s\n' "$json" |
-      jq -r --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" "${trivy_jq_defs}"'
-        [.Results[]?
-          | .Target as $target
-          | .Vulnerabilities[]?
-          | select(.Severity == "CRITICAL" or .Severity == "HIGH")
-          | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)
-          | finding($target) + {changed: ((.LastModifiedDate // .PublishedDate // "-")[0:10])}]
-        | sort_by(.changed, .rank, .package, .id)
-        | reverse
-        | to_entries[]
-        | [(.key + 1), .value.severity, .value.changed, .value.cvss_score, .value.attack_vector, .value.attack_complexity, .value.privileges, .value.user_interaction, .value.package, .value.installed, .value.fixed, .value.target, .value.id, (.value.title | .[0:160])]
-        | @tsv
-      ' 2>/dev/null
-    printf '\n'
-    printf 'Important findings\n'
-    printf '#\tSeverity\tCVSS\tAttack vector\tComplexity\tPrivileges\tUser action\tPackage\tInstalled\tFixed\tTarget\tVulnerability\tTitle\n'
-    printf '%s\n' "$json" |
-      jq -r "${trivy_jq_defs}"'
-        [.Results[]?
-          | .Target as $target
-          | .Vulnerabilities[]?
-          | select(.Severity == "CRITICAL" or .Severity == "HIGH")
-          | finding($target)]
-        | sort_by(.rank, .package, .id)
-        | to_entries[]
-        | [(.key + 1), .value.severity, .value.cvss_score, .value.attack_vector, .value.attack_complexity, .value.privileges, .value.user_interaction, .value.package, .value.installed, .value.fixed, .value.target, .value.id, (.value.title | .[0:160])]
-        | @tsv
-      ' 2>/dev/null
+    printf 'Recent high/critical changes\n'
+    if [[ "${DEP_RECENT_COUNT:-0}" -eq 0 ]]; then
+      printf 'No recent high/critical changes in the last %s days.\n' "$RECENT_DAYS"
+    else
+      printf '%s\n' "$json" |
+        jq -r --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" "${trivy_jq_defs}"'
+          def block:
+            "\( .key + 1 ). \(.value.severity) \(.value.id) (CVSS \(.value.cvss_score))\n"
+            + "   Package: \(.value.package) \(.value.installed) -> \(.value.fixed)\n"
+            + "   Target: \(.value.target)\n"
+            + "   Changed: \(.value.changed)\n"
+            + "   Attack: vector=\(.value.attack_vector), complexity=\(.value.attack_complexity), privileges=\(.value.privileges), user_action=\(.value.user_interaction)\n"
+            + "   Title: \(.value.title | .[0:220])\n"
+            + (if .value.url != "" then "   URL: \(.value.url)\n" else "" end);
+
+          [.Results[]?
+            | .Target as $target
+            | .Vulnerabilities[]?
+            | select(.Severity == "CRITICAL" or .Severity == "HIGH")
+            | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)
+            | finding($target) + {changed: ((.LastModifiedDate // .PublishedDate // "-")[0:10])}]
+          | sort_by(.changed, .rank, .package, .id)
+          | reverse
+          | to_entries[]
+          | block
+        ' 2>/dev/null
+    fi
     printf '\n'
     printf 'All findings\n'
-    printf '#\tSeverity\tCVSS\tAttack vector\tComplexity\tPrivileges\tUser action\tPackage\tInstalled\tFixed\tTarget\tVulnerability\tTitle\n'
-    printf '%s\n' "$json" |
-      jq -r "${trivy_jq_defs}"'
-        [.Results[]?
-          | .Target as $target
-          | .Vulnerabilities[]?
-          | finding($target)]
-        | sort_by(.rank, .package, .id)
-        | to_entries[]
-        | [(.key + 1), .value.severity, .value.cvss_score, .value.attack_vector, .value.attack_complexity, .value.privileges, .value.user_interaction, .value.package, .value.installed, .value.fixed, .value.target, .value.id, (.value.title | .[0:160])]
-        | @tsv
-      ' 2>/dev/null
+    if [[ "${DEP_COUNT:-0}" -eq 0 ]]; then
+      printf 'No dependency vulnerabilities found.\n'
+    else
+      printf '%s\n' "$json" |
+        jq -r "${trivy_jq_defs}"'
+          def block:
+            "\( .key + 1 ). \(.value.severity) \(.value.id) (CVSS \(.value.cvss_score))\n"
+            + "   Package: \(.value.package) \(.value.installed) -> \(.value.fixed)\n"
+            + "   Target: \(.value.target)\n"
+            + "   Attack: vector=\(.value.attack_vector), complexity=\(.value.attack_complexity), privileges=\(.value.privileges), user_action=\(.value.user_interaction)\n"
+            + "   Title: \(.value.title | .[0:220])\n"
+            + (if .value.url != "" then "   URL: \(.value.url)\n" else "" end);
+
+          [.Results[]?
+            | .Target as $target
+            | .Vulnerabilities[]?
+            | finding($target)]
+          | sort_by(.rank, .package, .id)
+          | to_entries[]
+          | block
+        ' 2>/dev/null
+    fi
   } > "$DEP_REPORT_FILE"
 
   {
@@ -476,7 +455,7 @@ write_trivy_dependency_report() {
     printf '<div class="pill">Total: %s</div>\n' "$DEP_COUNT"
     printf '<div class="pill">Recent high/critical changes: %s</div>\n' "$DEP_RECENT_COUNT"
     printf '%s\n' '</div>'
-    printf '%s\n' '<h2>Recent Important Changes</h2>'
+    printf '%s\n' '<h2>Recent High/Critical Changes</h2>'
     printf '%s\n' '<div class="table-wrap"><table class="sortable"><thead><tr><th class="num" data-sort="number">#</th><th class="severity" data-sort="number">Severity</th><th class="date" data-sort="text">Changed</th><th class="score" data-sort="number">CVSS</th><th class="attack" data-sort="number">Attack vector</th><th class="complexity" data-sort="number">Complexity</th><th class="privileges" data-sort="number">Privileges</th><th class="interaction" data-sort="number">User action</th><th class="package" data-sort="text">Package</th><th class="version" data-sort="text">Installed</th><th class="fixed" data-sort="text">Fixed</th><th class="target" data-sort="text">Target</th><th class="vuln" data-sort="text">Vulnerability</th><th class="title" data-sort="text">Title</th></tr></thead><tbody>'
     printf '%s\n' "$json" |
       jq -r --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" "${trivy_jq_defs}"'
@@ -491,21 +470,6 @@ write_trivy_dependency_report() {
         | reverse
         | to_entries[]
         | "<tr><td class=\"num\" data-sort-value=\"\(.key + 1)\">\(.key + 1)</td><td class=\"sev-\(.value.severity)\" data-sort-value=\"\(.value.rank)\">\(.value.severity | esc)</td><td class=\"date\" data-sort-value=\"\(.value.changed | esc)\">\(.value.changed | esc)</td><td class=\"score\" data-sort-value=\"\(.value.cvss_score_sort)\"><span title=\"\(.value.cvss_vector | esc)\">\(.value.cvss_score | esc)</span></td><td class=\"attack\" data-sort-value=\"\(.value.attack_vector_rank)\">\(.value.attack_vector | esc)</td><td class=\"complexity\" data-sort-value=\"\(.value.attack_complexity_rank)\">\(.value.attack_complexity | esc)</td><td class=\"privileges\" data-sort-value=\"\(.value.privileges_rank)\">\(.value.privileges | esc)</td><td class=\"interaction\" data-sort-value=\"\(.value.user_interaction_rank)\">\(.value.user_interaction | esc)</td><td>\(.value.package | esc)</td><td>\(.value.installed | esc)</td><td>\(.value.fixed | esc)</td><td>\(.value.target | esc)</td><td><a href=\"\(.value.url | esc)\">\(.value.id | esc)</a></td><td class=\"title\">\(.value.title | esc)</td></tr>"
-      ' 2>/dev/null
-    printf '%s\n' '</tbody></table></div>'
-    printf '%s\n' '<h2>Important Findings</h2>'
-    printf '%s\n' '<div class="table-wrap"><table class="sortable"><thead><tr><th class="num" data-sort="number">#</th><th class="severity" data-sort="number">Severity</th><th class="score" data-sort="number">CVSS</th><th class="attack" data-sort="number">Attack vector</th><th class="complexity" data-sort="number">Complexity</th><th class="privileges" data-sort="number">Privileges</th><th class="interaction" data-sort="number">User action</th><th class="package" data-sort="text">Package</th><th class="version" data-sort="text">Installed</th><th class="fixed" data-sort="text">Fixed</th><th class="target" data-sort="text">Target</th><th class="vuln" data-sort="text">Vulnerability</th><th class="title" data-sort="text">Title</th></tr></thead><tbody>'
-    printf '%s\n' "$json" |
-      jq -r "${trivy_jq_defs}"'
-        def esc: tostring | gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\""; "&quot;");
-        [.Results[]?
-          | .Target as $target
-          | .Vulnerabilities[]?
-          | select(.Severity == "CRITICAL" or .Severity == "HIGH")
-          | finding($target)]
-        | sort_by(.rank, .package, .id)
-        | to_entries[]
-        | "<tr><td class=\"num\" data-sort-value=\"\(.key + 1)\">\(.key + 1)</td><td class=\"sev-\(.value.severity)\" data-sort-value=\"\(.value.rank)\">\(.value.severity | esc)</td><td class=\"score\" data-sort-value=\"\(.value.cvss_score_sort)\"><span title=\"\(.value.cvss_vector | esc)\">\(.value.cvss_score | esc)</span></td><td class=\"attack\" data-sort-value=\"\(.value.attack_vector_rank)\">\(.value.attack_vector | esc)</td><td class=\"complexity\" data-sort-value=\"\(.value.attack_complexity_rank)\">\(.value.attack_complexity | esc)</td><td class=\"privileges\" data-sort-value=\"\(.value.privileges_rank)\">\(.value.privileges | esc)</td><td class=\"interaction\" data-sort-value=\"\(.value.user_interaction_rank)\">\(.value.user_interaction | esc)</td><td>\(.value.package | esc)</td><td>\(.value.installed | esc)</td><td>\(.value.fixed | esc)</td><td>\(.value.target | esc)</td><td><a href=\"\(.value.url | esc)\">\(.value.id | esc)</a></td><td class=\"title\">\(.value.title | esc)</td></tr>"
       ' 2>/dev/null
     printf '%s\n' '</tbody></table></div>'
     printf '%s\n' '<h2>All Findings</h2>'
@@ -569,7 +533,7 @@ write_trivy_dependency_report() {
 
 if [[ "${SEC_WATCH_FORCE:-0}" != "1" && -n "${UPDATED_AT:-}" && $((now - UPDATED_AT)) -lt "$TTL_SECONDS" ]]; then
   debug_log "using cached status from $CACHE_FILE"
-  : "${OS_COUNT:=0}" "${DEP_COUNT:=0}" "${DEP_IMPORTANT_COUNT:=0}" "${DEP_CRITICAL_COUNT:=0}" "${DEP_HIGH_COUNT:=0}" "${DEP_MEDIUM_COUNT:=0}" "${DEP_LOW_COUNT:=0}" "${DEP_RECENT_COUNT:=0}" "${DEP_RECENT_CRITICAL_COUNT:=0}" "${DEP_RECENT_HIGH_COUNT:=0}" "${DEP_REPORT_FILE:=$CACHE_DIR/dependency-report.txt}" "${DEP_HTML_REPORT_FILE:=$CACHE_DIR/dependency-report.html}" "${WATCH_COUNT:=0}" "${MANUAL_WATCH_COUNT:=0}" "${CISA_KEV_COUNT:=0}" "${CISA_KEV_RECENT_COUNT:=0}" "${NVD_RECENT_COUNT:=0}" "${RECENT_CHANGE_COUNT:=0}" "${SCANNER:=none}" "${SUMMARY:=cached}"
+  : "${DEP_COUNT:=0}" "${DEP_HIGH_CRITICAL_COUNT:=0}" "${DEP_CRITICAL_COUNT:=0}" "${DEP_HIGH_COUNT:=0}" "${DEP_MEDIUM_COUNT:=0}" "${DEP_LOW_COUNT:=0}" "${DEP_RECENT_COUNT:=0}" "${DEP_RECENT_CRITICAL_COUNT:=0}" "${DEP_RECENT_HIGH_COUNT:=0}" "${DEP_REPORT_FILE:=$CACHE_DIR/dependency-report.txt}" "${DEP_HTML_REPORT_FILE:=$CACHE_DIR/dependency-report.html}" "${WATCH_COUNT:=0}" "${MANUAL_WATCH_COUNT:=0}" "${CISA_KEV_COUNT:=0}" "${CISA_KEV_RECENT_COUNT:=0}" "${NVD_RECENT_COUNT:=0}" "${RECENT_CHANGE_COUNT:=0}" "${SCANNER:=none}" "${SUMMARY:=cached}"
 else
   debug_log "starting fresh scan"
   debug_log "cache dir: $CACHE_DIR"
@@ -577,9 +541,8 @@ else
   debug_log "selected projects: ${SELECTED_PROJECTS:-all}"
   debug_log "ecosystems: ${ENABLED_ECOSYSTEMS:-all}"
   debug_log "public feeds: ${PUBLIC_FEEDS:-none}"
-  OS_COUNT=0
   DEP_COUNT=0
-  DEP_IMPORTANT_COUNT=0
+  DEP_HIGH_CRITICAL_COUNT=0
   DEP_CRITICAL_COUNT=0
   DEP_HIGH_COUNT=0
   DEP_MEDIUM_COUNT=0
@@ -595,32 +558,6 @@ else
   RECENT_CHANGE_COUNT=0
   SCANNER=none
   SUMMARY=""
-
-  if [[ "$OS_ADVISORIES" != "0" ]]; then
-    debug_log "checking Fedora security advisories with timeout ${OS_TIMEOUT}s"
-    if command -v dnf5 >/dev/null 2>&1; then
-      debug_log "running dnf5 advisory query"
-      os_json="$(run_with_timeout "$OS_TIMEOUT" dnf5 advisory list --updates --security --with-cve --json 2>/dev/null)"
-      os_status=$?
-      if [[ "$os_status" -eq 124 ]]; then
-        debug_log "dnf5 advisory query timed out after ${OS_TIMEOUT}s"
-      fi
-      OS_COUNT="$(printf '%s\n' "$os_json" | jq_count 'length')"
-    elif command -v dnf >/dev/null 2>&1; then
-      debug_log "running dnf updateinfo query"
-      os_output="$(run_with_timeout "$OS_TIMEOUT" dnf updateinfo list updates security 2>/dev/null)"
-      os_status=$?
-      if [[ "$os_status" -eq 124 ]]; then
-        debug_log "dnf updateinfo query timed out after ${OS_TIMEOUT}s"
-      fi
-      OS_COUNT="$(printf '%s\n' "$os_output" | awk 'NF && $1 ~ /^FEDORA-/ {count++} END {print count + 0}')"
-    else
-      debug_log "no Fedora advisory tool found"
-    fi
-    debug_log "Fedora advisory count: $OS_COUNT"
-  else
-    debug_log "Fedora advisory checks disabled"
-  fi
 
   if [[ -d "$PROJECTS_DIR" ]]; then
     debug_log "checking dependency scanners"
@@ -653,7 +590,7 @@ else
     else
       debug_log "no dependency scanner found"
     fi
-    DEP_IMPORTANT_COUNT=$((DEP_CRITICAL_COUNT + DEP_HIGH_COUNT))
+    DEP_HIGH_CRITICAL_COUNT=$((DEP_CRITICAL_COUNT + DEP_HIGH_COUNT))
     debug_log "dependency scan complete: total=$DEP_COUNT critical=$DEP_CRITICAL_COUNT high=$DEP_HIGH_COUNT scanner=$SCANNER"
     if [[ "$SCANNER" == "trivy" ]]; then
       debug_log "writing Trivy dependency reports"
@@ -703,13 +640,12 @@ else
 
   RECENT_CHANGE_COUNT=$((DEP_RECENT_COUNT + CISA_KEV_RECENT_COUNT + NVD_RECENT_COUNT))
   UPDATED_AT="$now"
-  SUMMARY="Fedora: $OS_COUNT, Projects high/critical: $DEP_IMPORTANT_COUNT, Watch: $WATCH_COUNT, Recent: $RECENT_CHANGE_COUNT"
+  SUMMARY="Projects high/critical: $DEP_HIGH_CRITICAL_COUNT, Watch: $WATCH_COUNT, Recent: $RECENT_CHANGE_COUNT"
   debug_log "scan summary: $SUMMARY"
   {
     printf 'UPDATED_AT=%q\n' "$UPDATED_AT"
-    printf 'OS_COUNT=%q\n' "$OS_COUNT"
     printf 'DEP_COUNT=%q\n' "$DEP_COUNT"
-    printf 'DEP_IMPORTANT_COUNT=%q\n' "$DEP_IMPORTANT_COUNT"
+    printf 'DEP_HIGH_CRITICAL_COUNT=%q\n' "$DEP_HIGH_CRITICAL_COUNT"
     printf 'DEP_CRITICAL_COUNT=%q\n' "$DEP_CRITICAL_COUNT"
     printf 'DEP_HIGH_COUNT=%q\n' "$DEP_HIGH_COUNT"
     printf 'DEP_MEDIUM_COUNT=%q\n' "$DEP_MEDIUM_COUNT"
@@ -729,6 +665,9 @@ else
     printf 'SUMMARY=%q\n' "$SUMMARY"
   } > "$CACHE_FILE"
 fi
+
+DEP_HIGH_CRITICAL_COUNT=$((DEP_CRITICAL_COUNT + DEP_HIGH_COUNT))
+SUMMARY="Projects high/critical: $DEP_HIGH_CRITICAL_COUNT, Watch: $WATCH_COUNT, Recent: $RECENT_CHANGE_COUNT"
 
 echo "$SUMMARY"
 echo "project_total=$DEP_COUNT"
