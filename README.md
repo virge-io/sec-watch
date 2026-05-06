@@ -119,7 +119,8 @@ SEC_WATCH_WEB_TOKEN='change-me' uv run bin/sec-watch-server --host 0.0.0.0
 
 LAN clients can pass the token as `X-Sec-Watch-Token`, `Authorization: Bearer
 ...`, or `?token=...`. JSON clients can start a scan with `POST /scans` and
-poll `GET /api/scans/<id>`.
+poll `GET /api/scans/<id>`. Scan pages refresh while a job is queued or running
+and show the current stage.
 
 Scanner defaults are centralized in `bin/sec-watch defaults-env`. The webserver
 loads those defaults first, including installed GNOME extension settings when
@@ -131,6 +132,7 @@ SEC_WATCH_WEB_ECOSYSTEMS=npm,pip \
 SEC_WATCH_WEB_PUBLIC_FEEDS=manual,cisa-kev \
 SEC_WATCH_WEB_RECENT_DAYS=14 \
 SEC_WATCH_WEB_OS_ADVISORIES=1 \
+SEC_WATCH_WEB_DEBUG=1 \
 uv run bin/sec-watch-server
 ```
 
@@ -153,6 +155,16 @@ This scans only the local dependency files under the selected directory. The
 scanner settings start from `bin/sec-watch defaults-env`, so GNOME preferences
 and `SEC_WATCH_*` environment overrides are shared. To skip Fedora advisory
 checks for a dependency-only local scan, pass `--no-os-advisories`.
+Normal CLI output prints progress while it validates the path, prepares any
+branch worktree, runs the scanner, and writes reports. `--json` stays quiet
+until the final machine-readable result. Add `--debug` to print effective
+scanner settings and internal scanner milestones. Fedora advisory queries are
+bounded by `SEC_WATCH_OS_TIMEOUT`, which defaults to 60 seconds:
+
+```bash
+SEC_WATCH_OS_TIMEOUT=15 bin/sec-watch-local . --debug
+```
+
 To scan a local Git branch without changing your working tree:
 
 ```bash

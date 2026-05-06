@@ -47,6 +47,7 @@ class Settings:
     git_timeout: int
     scan_timeout: int
     scanner_env_overrides: dict[str, str]
+    debug: bool
 
     @property
     def repos_dir(self) -> Path:
@@ -66,6 +67,7 @@ class ScanJob:
     branch: str
     force: bool
     status: str = "queued"
+    stage: str = "Queued"
     created_at: str = field(default_factory=lambda: utc_now())
     updated_at: str = field(default_factory=lambda: utc_now())
     worktree: str = ""
@@ -78,6 +80,7 @@ class ScanJob:
     error: str = ""
     stdout_tail: str = ""
     stderr_tail: str = ""
+    debug_log: list[str] = field(default_factory=list)
 
 
 def utc_now() -> str:
@@ -317,6 +320,9 @@ def run_scanner(settings: Settings, worktree_dir: Path, job_cache_dir: Path, for
         env["SEC_WATCH_OS_ADVISORIES"] = "0"
     if force:
         env["SEC_WATCH_FORCE"] = "1"
+    if settings.debug:
+        env["SEC_WATCH_DEBUG"] = "1"
+        env["SEC_WATCH_DEBUG_FILE"] = str(job_cache_dir.parent / "debug.log")
 
     return run_command(
         [str(settings.scanner), "status"],
@@ -332,6 +338,22 @@ def update_job(jobs: dict[str, ScanJob], jobs_lock: threading.Lock, job_id: str,
         for key, value in fields.items():
             setattr(job, key, value)
         job.updated_at = utc_now()
+
+
+def add_debug(jobs: dict[str, ScanJob], jobs_lock: threading.Lock, job_id: str, message: str) -> None:
+    with jobs_lock:
+        job = jobs[job_id]
+        job.debug_log.append(f"{utc_now()} {message}")
+        job.updated_at = utc_now()
+
+
+def add_debug_file(jobs: dict[str, ScanJob], jobs_lock: threading.Lock, job_id: str, path: Path) -> None:
+    if not path.exists():
+        return
+
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            add_debug(jobs, jobs_lock, job_id, f"scanner: {line.rstrip()}")
 
 
 def get_job(jobs: dict[str, ScanJob], jobs_lock: threading.Lock, job_id: str) -> ScanJob | None:
@@ -351,7 +373,8 @@ def run_scan_job(settings: Settings, jobs: dict[str, ScanJob], jobs_lock: thread
     if job is None:
         return
 
-    update_job(jobs, jobs_lock, job_id, status="running")
+    update_job(jobs, jobs_lock, job_id, status="running", stage="Preparing scan directories")
+    add_debug(jobs, jobs_lock, job_id, "Preparing scan directories")
     job_dir = settings.jobs_dir / job_id
     worktree_dir = job_dir / "worktree"
     job_cache_dir = job_dir / "cache"
@@ -359,11 +382,19 @@ def run_scan_job(settings: Settings, jobs: dict[str, ScanJob], jobs_lock: thread
     job_cache_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        update_job(jobs, jobs_lock, job_id, stage="Updating cached repository mirror")
+        add_debug(jobs, jobs_lock, job_id, f"Updating cached repository mirror for {job.source_display}")
         mirror_dir = ensure_mirror(settings, repo_lock, job.source_type, job.source, job.branch, job.force)
+        update_job(jobs, jobs_lock, job_id, stage=f"Checking out branch {job.branch}")
+        add_debug(jobs, jobs_lock, job_id, f"Checking out branch {job.branch}")
         checkout_worktree(settings, mirror_dir, job.branch, worktree_dir)
         update_job(jobs, jobs_lock, job_id, worktree=str(worktree_dir))
+        add_debug(jobs, jobs_lock, job_id, f"Worktree ready at {worktree_dir}")
 
+        update_job(jobs, jobs_lock, job_id, stage="Running security scanner")
+        add_debug(jobs, jobs_lock, job_id, "Running security scanner")
         result = run_scanner(settings, worktree_dir, job_cache_dir, job.force)
+        add_debug_file(jobs, jobs_lock, job_id, job_dir / "debug.log")
         status = parse_status(result.stdout)
         fields = {
             "exit_code": result.returncode,
@@ -376,13 +407,17 @@ def run_scan_job(settings: Settings, jobs: dict[str, ScanJob], jobs_lock: thread
             "json_report_path": str(job_cache_dir / "sec-watch" / "dependency-report.json"),
         }
         if result.returncode == 0:
-            update_job(jobs, jobs_lock, job_id, status="done", **fields)
+            update_job(jobs, jobs_lock, job_id, status="done", stage="Finished", **fields)
+            add_debug(jobs, jobs_lock, job_id, "Scan finished")
         else:
-            update_job(jobs, jobs_lock, job_id, status="failed", error=tail(result.stderr or result.stdout), **fields)
+            update_job(jobs, jobs_lock, job_id, status="failed", stage="Scanner failed", error=tail(result.stderr or result.stdout), **fields)
+            add_debug(jobs, jobs_lock, job_id, f"Scanner failed with exit code {result.returncode}")
     except (InputError, CommandError) as error:
-        update_job(jobs, jobs_lock, job_id, status="failed", error=str(error))
+        update_job(jobs, jobs_lock, job_id, status="failed", stage="Failed", error=str(error))
+        add_debug(jobs, jobs_lock, job_id, f"Failed: {error}")
     except Exception as error:
-        update_job(jobs, jobs_lock, job_id, status="failed", error=f"{type(error).__name__}: {error}")
+        update_job(jobs, jobs_lock, job_id, status="failed", stage="Failed", error=f"{type(error).__name__}: {error}")
+        add_debug(jobs, jobs_lock, job_id, f"Failed: {type(error).__name__}: {error}")
 
 
 def html_escape(value: Any) -> str:
@@ -425,6 +460,7 @@ tr:last-child td{{border-bottom:0;}}
 .status-failed{{color:#b3261e;font-weight:700;}}
 .status-running,.status-queued{{color:#8a5a00;font-weight:700;}}
 .error{{white-space:pre-wrap;color:#b3261e;}}
+.debug{{white-space:pre-wrap;background:#101418;color:#d9e2ec;border-radius:8px;padding:12px;overflow:auto;}}
 @media (max-width:760px){{main{{padding:16px;}}.grid{{grid-template-columns:1fr;}}table{{display:block;overflow-x:auto;}}}}
 </style>
 </head>
@@ -493,11 +529,15 @@ def render_scan(settings: Settings, job: ScanJob, query: str) -> str:
         report = '<span class="muted">No HTML report was generated.</span>'
 
     error = f"<h2>Error</h2><div class=\"panel error\">{html_escape(job.error)}</div>" if job.error else ""
+    debug_log = ""
+    if job.debug_log:
+        debug_log = f"<h2>Debug Log</h2><pre class=\"debug\">{html_escape(chr(10).join(job.debug_log[-200:]))}</pre>"
     body = f"""
 {refresh}
 <h1>Scan {html_escape(job.id[:8])}</h1>
 <div class="panel">
   <p><strong>Status:</strong> <span class="status-{html_escape(job.status)}">{html_escape(job.status)}</span></p>
+  <p><strong>Stage:</strong> {html_escape(job.stage)}</p>
   <p><strong>Repository:</strong> {html_escape(job.source_display)}</p>
   <p><strong>Branch:</strong> {html_escape(job.branch)}</p>
   <p><strong>Summary:</strong> {html_escape(job.summary or "-")}</p>
@@ -509,6 +549,7 @@ def render_scan(settings: Settings, job: ScanJob, query: str) -> str:
   </div>
 </div>
 {error}
+{debug_log}
 """
     return render_page(f"Scan {job.id[:8]}", body)
 
@@ -667,6 +708,7 @@ def parse_args(argv: list[str]) -> Settings:
     parser.add_argument("--public-feeds", default=os.environ.get("SEC_WATCH_WEB_PUBLIC_FEEDS"))
     parser.add_argument("--recent-days", type=int, default=int(os.environ["SEC_WATCH_WEB_RECENT_DAYS"]) if "SEC_WATCH_WEB_RECENT_DAYS" in os.environ else None)
     parser.add_argument("--os-advisories", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--debug", action="store_true", default=bool_from_env(os.environ.get("SEC_WATCH_WEB_DEBUG", "")))
     args = parser.parse_args(argv)
 
     token = os.environ.get("SEC_WATCH_WEB_TOKEN", "")
@@ -685,6 +727,7 @@ def parse_args(argv: list[str]) -> Settings:
         git_timeout=args.git_timeout,
         scan_timeout=args.scan_timeout,
         scanner_env_overrides=scanner_overrides_from_args(args),
+        debug=args.debug,
     )
 
 

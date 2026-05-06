@@ -8,6 +8,7 @@ DEFAULT_PUBLIC_FEEDS="manual,cisa-kev,nvd-recent"
 DEFAULT_TTL_SECONDS="1800"
 DEFAULT_RECENT_DAYS="7"
 DEFAULT_OS_ADVISORIES="1"
+DEFAULT_OS_TIMEOUT="60"
 DEFAULT_WATCH_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/sec-watch/watch.json"
 GSETTINGS_SCHEMA="org.gnome.shell.extensions.sec-watch"
 
@@ -122,6 +123,7 @@ emit_defaults_env() {
   printf 'SEC_WATCH_TTL=%s\n' "${SEC_WATCH_TTL:-$DEFAULT_TTL_SECONDS}"
   printf 'SEC_WATCH_RECENT_DAYS=%s\n' "${SEC_WATCH_RECENT_DAYS:-$DEFAULT_RECENT_DAYS}"
   printf 'SEC_WATCH_OS_ADVISORIES=%s\n' "${SEC_WATCH_OS_ADVISORIES:-$DEFAULT_OS_ADVISORIES}"
+  printf 'SEC_WATCH_OS_TIMEOUT=%s\n' "${SEC_WATCH_OS_TIMEOUT:-$DEFAULT_OS_TIMEOUT}"
   printf 'SEC_WATCH_CONFIG=%s\n' "${SEC_WATCH_CONFIG:-$DEFAULT_WATCH_CONFIG}"
 }
 
@@ -157,8 +159,32 @@ WATCH_CONFIG="${SEC_WATCH_CONFIG:-$DEFAULT_WATCH_CONFIG}"
 TTL_SECONDS="${SEC_WATCH_TTL:-$DEFAULT_TTL_SECONDS}"
 RECENT_DAYS="${SEC_WATCH_RECENT_DAYS:-$DEFAULT_RECENT_DAYS}"
 OS_ADVISORIES="${SEC_WATCH_OS_ADVISORIES:-$DEFAULT_OS_ADVISORIES}"
+OS_TIMEOUT="${SEC_WATCH_OS_TIMEOUT:-$DEFAULT_OS_TIMEOUT}"
 CISA_KEV_URL="https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 NVD_RECENT_URL="https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-recent.json.gz"
+
+run_with_timeout() {
+  local seconds="$1"
+  shift
+
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  else
+    "$@"
+  fi
+}
+
+debug_log() {
+  local message="$*"
+
+  [[ "${SEC_WATCH_DEBUG:-0}" == "1" ]] || return 0
+
+  printf '[sec-watch] %s\n' "$message" >&2
+  if [[ -n "${SEC_WATCH_DEBUG_FILE:-}" ]]; then
+    mkdir -p "$(dirname "$SEC_WATCH_DEBUG_FILE")"
+    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$message" >> "$SEC_WATCH_DEBUG_FILE"
+  fi
+}
 
 mkdir -p "$CACHE_DIR"
 
@@ -195,7 +221,7 @@ count_manual_watch_cves() {
     while read -r cve; do
       [[ -n "$cve" ]] || continue
       if command -v dnf5 >/dev/null 2>&1 &&
-        ! dnf5 advisory list --all --security --with-cve --cves="$cve" 2>/dev/null | grep -q 'No advisory found'; then
+        ! run_with_timeout "$OS_TIMEOUT" dnf5 advisory list --all --security --with-cve --cves="$cve" 2>/dev/null | grep -q 'No advisory found'; then
         printf '%s\n' "$cve"
       else
         printf '%s\n' "$cve"
@@ -689,8 +715,15 @@ write_trivy_dependency_report() {
 }
 
 if [[ "${SEC_WATCH_FORCE:-0}" != "1" && -n "${UPDATED_AT:-}" && $((now - UPDATED_AT)) -lt "$TTL_SECONDS" ]]; then
+  debug_log "using cached status from $CACHE_FILE"
   : "${OS_COUNT:=0}" "${DEP_COUNT:=0}" "${DEP_IMPORTANT_COUNT:=0}" "${DEP_CRITICAL_COUNT:=0}" "${DEP_HIGH_COUNT:=0}" "${DEP_MEDIUM_COUNT:=0}" "${DEP_LOW_COUNT:=0}" "${DEP_RECENT_COUNT:=0}" "${DEP_RECENT_CRITICAL_COUNT:=0}" "${DEP_RECENT_HIGH_COUNT:=0}" "${DEP_REPORT_FILE:=$CACHE_DIR/dependency-report.txt}" "${DEP_HTML_REPORT_FILE:=$CACHE_DIR/dependency-report.html}" "${WATCH_COUNT:=0}" "${MANUAL_WATCH_COUNT:=0}" "${CISA_KEV_COUNT:=0}" "${CISA_KEV_RECENT_COUNT:=0}" "${NVD_RECENT_COUNT:=0}" "${RECENT_CHANGE_COUNT:=0}" "${SCANNER:=none}" "${SUMMARY:=cached}"
 else
+  debug_log "starting fresh scan"
+  debug_log "cache dir: $CACHE_DIR"
+  debug_log "projects dir: $PROJECTS_DIR"
+  debug_log "selected projects: ${SELECTED_PROJECTS:-all}"
+  debug_log "ecosystems: ${ENABLED_ECOSYSTEMS:-all}"
+  debug_log "public feeds: ${PUBLIC_FEEDS:-none}"
   OS_COUNT=0
   DEP_COUNT=0
   DEP_IMPORTANT_COUNT=0
@@ -711,17 +744,36 @@ else
   SUMMARY=""
 
   if [[ "$OS_ADVISORIES" != "0" ]]; then
+    debug_log "checking Fedora security advisories with timeout ${OS_TIMEOUT}s"
     if command -v dnf5 >/dev/null 2>&1; then
-      os_json="$(dnf5 advisory list --updates --security --with-cve --json 2>/dev/null || true)"
+      debug_log "running dnf5 advisory query"
+      os_json="$(run_with_timeout "$OS_TIMEOUT" dnf5 advisory list --updates --security --with-cve --json 2>/dev/null)"
+      os_status=$?
+      if [[ "$os_status" -eq 124 ]]; then
+        debug_log "dnf5 advisory query timed out after ${OS_TIMEOUT}s"
+      fi
       OS_COUNT="$(printf '%s\n' "$os_json" | jq 'length' 2>/dev/null || printf '0')"
     elif command -v dnf >/dev/null 2>&1; then
-      OS_COUNT="$(dnf updateinfo list updates security 2>/dev/null | awk 'NF && $1 ~ /^FEDORA-/ {count++} END {print count + 0}')"
+      debug_log "running dnf updateinfo query"
+      os_output="$(run_with_timeout "$OS_TIMEOUT" dnf updateinfo list updates security 2>/dev/null)"
+      os_status=$?
+      if [[ "$os_status" -eq 124 ]]; then
+        debug_log "dnf updateinfo query timed out after ${OS_TIMEOUT}s"
+      fi
+      OS_COUNT="$(printf '%s\n' "$os_output" | awk 'NF && $1 ~ /^FEDORA-/ {count++} END {print count + 0}')"
+    else
+      debug_log "no Fedora advisory tool found"
     fi
+    debug_log "Fedora advisory count: $OS_COUNT"
+  else
+    debug_log "Fedora advisory checks disabled"
   fi
 
   if [[ -d "$PROJECTS_DIR" ]]; then
+    debug_log "checking dependency scanners"
     if command -v osv-scanner >/dev/null 2>&1; then
       SCANNER=osv-scanner
+      debug_log "running osv-scanner"
       dep_json="$(osv-scanner scan source -r --format json "$PROJECTS_DIR" 2>/dev/null || true)"
       printf '%s\n' "$dep_json" > "$DEP_JSON_FILE"
       DEP_COUNT="$(printf '%s\n' "$dep_json" | jq '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]?] | length' 2>/dev/null || printf '0')"
@@ -732,7 +784,9 @@ else
       DEP_RECENT_COUNT="$(printf '%s\n' "$dep_json" | jq --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.. | objects | select(has("vulnerabilities")) | .vulnerabilities[]? | select(((.modified // .published // "")[0:10]) >= $since)] | length' 2>/dev/null || printf '0')"
     elif command -v trivy >/dev/null 2>&1; then
       SCANNER=trivy
+      debug_log "running Trivy filesystem scan"
       dep_json="$(trivy fs --scanners vuln --format json "$PROJECTS_DIR" 2>/dev/null || true)"
+      debug_log "filtering Trivy results"
       dep_json="$(filter_trivy_json "$dep_json")"
       printf '%s\n' "$dep_json" > "$DEP_JSON_FILE"
       DEP_COUNT="$(printf '%s\n' "$dep_json" | jq '[.Results[]?.Vulnerabilities[]?] | length' 2>/dev/null || printf '0')"
@@ -743,11 +797,16 @@ else
       DEP_RECENT_COUNT="$(printf '%s\n' "$dep_json" | jq --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)] | length' 2>/dev/null || printf '0')"
       DEP_RECENT_CRITICAL_COUNT="$(printf '%s\n' "$dep_json" | jq --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)] | length' 2>/dev/null || printf '0')"
       DEP_RECENT_HIGH_COUNT="$(printf '%s\n' "$dep_json" | jq --arg since "$(date -d "$RECENT_DAYS days ago" '+%Y-%m-%d')" '[.Results[]?.Vulnerabilities[]? | select(.Severity == "HIGH") | select(((.LastModifiedDate // .PublishedDate // "")[0:10]) >= $since)] | length' 2>/dev/null || printf '0')"
+    else
+      debug_log "no dependency scanner found"
     fi
     DEP_IMPORTANT_COUNT=$((DEP_CRITICAL_COUNT + DEP_HIGH_COUNT))
+    debug_log "dependency scan complete: total=$DEP_COUNT critical=$DEP_CRITICAL_COUNT high=$DEP_HIGH_COUNT scanner=$SCANNER"
     if [[ "$SCANNER" == "trivy" ]]; then
+      debug_log "writing Trivy dependency reports"
       write_trivy_dependency_report "$dep_json"
     elif [[ "$SCANNER" != "none" ]]; then
+      debug_log "writing generic dependency report"
       {
         printf 'Security dependency report\n'
         printf 'Generated: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
@@ -764,25 +823,35 @@ else
         printf 'Raw JSON: %s\n' "$DEP_JSON_FILE"
       } > "$DEP_REPORT_FILE"
     fi
+  else
+    debug_log "projects directory does not exist: $PROJECTS_DIR"
   fi
 
   if [[ -f "$WATCH_CONFIG" ]] && command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    debug_log "checking public watch feeds"
     if feed_enabled manual; then
+      debug_log "counting manual watch CVEs"
       MANUAL_WATCH_COUNT="$(count_manual_watch_cves)"
     fi
     if feed_enabled cisa-kev; then
+      debug_log "checking CISA KEV matches"
       CISA_KEV_COUNT="$(count_cisa_kev_matches)"
       CISA_KEV_RECENT_COUNT="$(count_cisa_kev_matches "$RECENT_DAYS")"
     fi
     if feed_enabled nvd-recent; then
+      debug_log "checking NVD Recent matches"
       NVD_RECENT_COUNT="$(count_nvd_recent_matches)"
     fi
     WATCH_COUNT=$((MANUAL_WATCH_COUNT + CISA_KEV_COUNT + NVD_RECENT_COUNT))
+    debug_log "watch feed count: $WATCH_COUNT"
+  else
+    debug_log "public watch feeds unavailable or config missing"
   fi
 
   RECENT_CHANGE_COUNT=$((DEP_RECENT_COUNT + CISA_KEV_RECENT_COUNT + NVD_RECENT_COUNT))
   UPDATED_AT="$now"
   SUMMARY="Fedora: $OS_COUNT, Projects high/critical: $DEP_IMPORTANT_COUNT, Watch: $WATCH_COUNT, Recent: $RECENT_CHANGE_COUNT"
+  debug_log "scan summary: $SUMMARY"
   {
     printf 'UPDATED_AT=%q\n' "$UPDATED_AT"
     printf 'OS_COUNT=%q\n' "$OS_COUNT"
