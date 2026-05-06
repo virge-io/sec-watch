@@ -46,6 +46,7 @@ class Settings:
     workers: int
     git_timeout: int
     scan_timeout: int
+    scanner_env_overrides: dict[str, str]
 
     @property
     def repos_dir(self) -> Path:
@@ -143,6 +144,19 @@ def run_command(args: list[str], *, timeout: int, env: dict[str, str] | None = N
         message = tail(result.stderr.strip() or result.stdout.strip() or f"{args[0]} exited {result.returncode}")
         raise CommandError(message)
     return result
+
+
+def default_scan_env(scanner: Path, timeout: int) -> dict[str, str]:
+    env = os.environ.copy()
+    result = run_command([str(scanner), "defaults-env"], timeout=timeout, env=env, check=False)
+    if result.returncode != 0:
+        return env
+
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator and key.startswith("SEC_WATCH_"):
+            env[key] = value
+    return env
 
 
 def validate_branch(branch: str) -> str:
@@ -294,11 +308,13 @@ def run_scanner(settings: Settings, worktree_dir: Path, job_cache_dir: Path, for
     if not settings.scanner.exists():
         raise CommandError(f"Scanner not found: {settings.scanner}")
 
-    env = os.environ.copy()
+    env = default_scan_env(settings.scanner, settings.git_timeout)
+    env.update(settings.scanner_env_overrides)
     env["XDG_CACHE_HOME"] = str(job_cache_dir)
     env["SEC_WATCH_PROJECTS_DIR"] = str(worktree_dir)
     env["SEC_WATCH_PROJECTS"] = ""
-    env["SEC_WATCH_OS_ADVISORIES"] = "0"
+    if "SEC_WATCH_OS_ADVISORIES" not in settings.scanner_env_overrides:
+        env["SEC_WATCH_OS_ADVISORIES"] = "0"
     if force:
         env["SEC_WATCH_FORCE"] = "1"
 
@@ -512,6 +528,29 @@ def parse_authorization(value: str) -> str:
     return ""
 
 
+def bool_from_env(value: str) -> bool:
+    return value.strip().lower() in TRUE_VALUES
+
+
+def scanner_overrides_from_args(args: argparse.Namespace) -> dict[str, str]:
+    overrides = {}
+
+    if args.ecosystems is not None:
+        overrides["SEC_WATCH_ECOSYSTEMS"] = args.ecosystems
+    if args.public_feeds is not None:
+        overrides["SEC_WATCH_PUBLIC_FEEDS"] = args.public_feeds
+    if args.recent_days is not None:
+        overrides["SEC_WATCH_RECENT_DAYS"] = str(args.recent_days)
+
+    os_advisories = args.os_advisories
+    if os_advisories is None and "SEC_WATCH_WEB_OS_ADVISORIES" in os.environ:
+        os_advisories = bool_from_env(os.environ["SEC_WATCH_WEB_OS_ADVISORIES"])
+    if os_advisories is not None:
+        overrides["SEC_WATCH_OS_ADVISORIES"] = "1" if os_advisories else "0"
+
+    return overrides
+
+
 def create_app(settings: Settings):
     from fastapi import FastAPI, HTTPException, Request
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
@@ -624,6 +663,10 @@ def parse_args(argv: list[str]) -> Settings:
     parser.add_argument("--workers", type=int, default=int(os.environ.get("SEC_WATCH_WEB_WORKERS", "1")))
     parser.add_argument("--git-timeout", type=int, default=int(os.environ.get("SEC_WATCH_WEB_GIT_TIMEOUT", "300")))
     parser.add_argument("--scan-timeout", type=int, default=int(os.environ.get("SEC_WATCH_WEB_SCAN_TIMEOUT", "1800")))
+    parser.add_argument("--ecosystems", default=os.environ.get("SEC_WATCH_WEB_ECOSYSTEMS"))
+    parser.add_argument("--public-feeds", default=os.environ.get("SEC_WATCH_WEB_PUBLIC_FEEDS"))
+    parser.add_argument("--recent-days", type=int, default=int(os.environ["SEC_WATCH_WEB_RECENT_DAYS"]) if "SEC_WATCH_WEB_RECENT_DAYS" in os.environ else None)
+    parser.add_argument("--os-advisories", action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args(argv)
 
     token = os.environ.get("SEC_WATCH_WEB_TOKEN", "")
@@ -641,6 +684,7 @@ def parse_args(argv: list[str]) -> Settings:
         workers=args.workers,
         git_timeout=args.git_timeout,
         scan_timeout=args.scan_timeout,
+        scanner_env_overrides=scanner_overrides_from_args(args),
     )
 
 

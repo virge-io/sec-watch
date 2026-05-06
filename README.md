@@ -121,6 +121,19 @@ LAN clients can pass the token as `X-Sec-Watch-Token`, `Authorization: Bearer
 ...`, or `?token=...`. JSON clients can start a scan with `POST /scans` and
 poll `GET /api/scans/<id>`.
 
+Scanner defaults are centralized in `bin/sec-watch defaults-env`. The webserver
+loads those defaults first, including installed GNOME extension settings when
+available, then overrides the project directory with the requested scan
+worktree. Server-specific overrides can be passed with:
+
+```bash
+SEC_WATCH_WEB_ECOSYSTEMS=npm,pip \
+SEC_WATCH_WEB_PUBLIC_FEEDS=manual,cisa-kev \
+SEC_WATCH_WEB_RECENT_DAYS=14 \
+SEC_WATCH_WEB_OS_ADVISORIES=1 \
+uv run bin/sec-watch-server
+```
+
 The server accepts Git URLs and existing local Git repository paths. It keeps
 repository mirrors and per-scan worktrees under:
 
@@ -136,9 +149,11 @@ For a local-files-only scan without the webserver, run:
 bin/sec-watch-local /path/to/project
 ```
 
-This disables Fedora advisory checks and public watch feeds, then scans only the
-local dependency files under the selected directory. To scan a local Git branch
-without changing your working tree:
+This scans only the local dependency files under the selected directory. The
+scanner settings start from `bin/sec-watch defaults-env`, so GNOME preferences
+and `SEC_WATCH_*` environment overrides are shared. To skip Fedora advisory
+checks for a dependency-only local scan, pass `--no-os-advisories`.
+To scan a local Git branch without changing your working tree:
 
 ```bash
 bin/sec-watch-local /path/to/repo --branch main
@@ -148,6 +163,14 @@ The CLI stores its run cache and reports under:
 
 ```text
 ~/.cache/sec-watch-local
+```
+
+Local CLI-specific overrides use the `SEC_WATCH_LOCAL_*` prefix or matching
+flags:
+
+```bash
+SEC_WATCH_LOCAL_ECOSYSTEMS=npm,pip bin/sec-watch-local .
+bin/sec-watch-local . --public-feeds '' --no-os-advisories
 ```
 
 ## Development

@@ -1,29 +1,162 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-PROJECTS_DIR="${SEC_WATCH_PROJECTS_DIR:-${PROJECTS_DIR:-$HOME/Projects}}"
+DEFAULT_PROJECTS_DIR="$HOME/Projects"
+DEFAULT_SELECTED_PROJECTS=""
+DEFAULT_ECOSYSTEMS="npm,yarn,pnpm,pip,poetry,uv,python-pkg"
+DEFAULT_PUBLIC_FEEDS="manual,cisa-kev,nvd-recent"
+DEFAULT_TTL_SECONDS="1800"
+DEFAULT_RECENT_DAYS="7"
+DEFAULT_OS_ADVISORIES="1"
+DEFAULT_WATCH_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/sec-watch/watch.json"
+GSETTINGS_SCHEMA="org.gnome.shell.extensions.sec-watch"
+
+gsettings_schema_available() {
+  command -v gsettings >/dev/null 2>&1 &&
+    gsettings list-schemas 2>/dev/null | grep -qx "$GSETTINGS_SCHEMA"
+}
+
+gvariant_string() {
+  local value="$1"
+  value="${value#\'}"
+  value="${value%\'}"
+  value="${value//\\\'/\'}"
+  printf '%s' "$value"
+}
+
+gvariant_strv_csv() {
+  local value="$1"
+
+  value="${value#@as }"
+  if [[ "$value" == "[]" ]]; then
+    printf ''
+    return
+  fi
+
+  value="${value#[}"
+  value="${value%]}"
+  value="${value//\', \'/,}"
+  value="${value#\'}"
+  value="${value%\'}"
+  value="${value//\\\'/\'}"
+  printf '%s' "$value"
+}
+
+gnome_setting_string() {
+  local key="$1"
+  local fallback="$2"
+  local value
+
+  if gsettings_schema_available; then
+    value="$(gsettings get "$GSETTINGS_SCHEMA" "$key" 2>/dev/null || true)"
+    if [[ -n "$value" ]]; then
+      value="$(gvariant_string "$value")"
+      if [[ -n "$value" ]]; then
+        printf '%s' "$value"
+        return
+      fi
+    fi
+  fi
+
+  printf '%s' "$fallback"
+}
+
+gnome_setting_strv() {
+  local key="$1"
+  local fallback="$2"
+  local value
+
+  if gsettings_schema_available; then
+    value="$(gsettings get "$GSETTINGS_SCHEMA" "$key" 2>/dev/null || true)"
+    if [[ -n "$value" ]]; then
+      value="$(gvariant_strv_csv "$value")"
+      printf '%s' "$value"
+      return
+    fi
+  fi
+
+  printf '%s' "$fallback"
+}
+
+gnome_setting_int() {
+  local key="$1"
+  local fallback="$2"
+  local value
+
+  if gsettings_schema_available; then
+    value="$(gsettings get "$GSETTINGS_SCHEMA" "$key" 2>/dev/null || true)"
+    if [[ "$value" =~ ^[0-9]+$ ]]; then
+      printf '%s' "$value"
+      return
+    fi
+  fi
+
+  printf '%s' "$fallback"
+}
+
+DEFAULT_PROJECTS_DIR="$(gnome_setting_string projects-dir "$DEFAULT_PROJECTS_DIR")"
+DEFAULT_SELECTED_PROJECTS="$(gnome_setting_strv selected-projects "$DEFAULT_SELECTED_PROJECTS")"
+DEFAULT_ECOSYSTEMS="$(gnome_setting_strv enabled-ecosystems "$DEFAULT_ECOSYSTEMS")"
+DEFAULT_PUBLIC_FEEDS="$(gnome_setting_strv enabled-public-feeds "$DEFAULT_PUBLIC_FEEDS")"
+DEFAULT_TTL_SECONDS="$(gnome_setting_int scan-interval "$DEFAULT_TTL_SECONDS")"
+
+emit_defaults_env() {
+  local projects="$DEFAULT_SELECTED_PROJECTS"
+  local ecosystems="$DEFAULT_ECOSYSTEMS"
+  local public_feeds="$DEFAULT_PUBLIC_FEEDS"
+
+  if [[ -v SEC_WATCH_PROJECTS ]]; then
+    projects="$SEC_WATCH_PROJECTS"
+  fi
+  if [[ -v SEC_WATCH_ECOSYSTEMS ]]; then
+    ecosystems="$SEC_WATCH_ECOSYSTEMS"
+  fi
+  if [[ -v SEC_WATCH_PUBLIC_FEEDS ]]; then
+    public_feeds="$SEC_WATCH_PUBLIC_FEEDS"
+  fi
+
+  printf 'SEC_WATCH_PROJECTS_DIR=%s\n' "${SEC_WATCH_PROJECTS_DIR:-${PROJECTS_DIR:-$DEFAULT_PROJECTS_DIR}}"
+  printf 'SEC_WATCH_PROJECTS=%s\n' "$projects"
+  printf 'SEC_WATCH_ECOSYSTEMS=%s\n' "$ecosystems"
+  printf 'SEC_WATCH_PUBLIC_FEEDS=%s\n' "$public_feeds"
+  printf 'SEC_WATCH_TTL=%s\n' "${SEC_WATCH_TTL:-$DEFAULT_TTL_SECONDS}"
+  printf 'SEC_WATCH_RECENT_DAYS=%s\n' "${SEC_WATCH_RECENT_DAYS:-$DEFAULT_RECENT_DAYS}"
+  printf 'SEC_WATCH_OS_ADVISORIES=%s\n' "${SEC_WATCH_OS_ADVISORIES:-$DEFAULT_OS_ADVISORIES}"
+  printf 'SEC_WATCH_CONFIG=%s\n' "${SEC_WATCH_CONFIG:-$DEFAULT_WATCH_CONFIG}"
+}
+
+if [[ "${1:-}" == "defaults-env" ]]; then
+  emit_defaults_env
+  exit 0
+fi
+
+PROJECTS_DIR="${SEC_WATCH_PROJECTS_DIR:-${PROJECTS_DIR:-$DEFAULT_PROJECTS_DIR}}"
 if [[ -v SEC_WATCH_ECOSYSTEMS ]]; then
   ENABLED_ECOSYSTEMS="$SEC_WATCH_ECOSYSTEMS"
   ECOSYSTEM_FILTER_SET=1
 else
-  ENABLED_ECOSYSTEMS=""
-  ECOSYSTEM_FILTER_SET=0
+  ENABLED_ECOSYSTEMS="$DEFAULT_ECOSYSTEMS"
+  ECOSYSTEM_FILTER_SET=1
 fi
-SELECTED_PROJECTS="${SEC_WATCH_PROJECTS:-}"
+if [[ -v SEC_WATCH_PROJECTS ]]; then
+  SELECTED_PROJECTS="$SEC_WATCH_PROJECTS"
+else
+  SELECTED_PROJECTS="$DEFAULT_SELECTED_PROJECTS"
+fi
 if [[ -v SEC_WATCH_PUBLIC_FEEDS ]]; then
   PUBLIC_FEEDS="$SEC_WATCH_PUBLIC_FEEDS"
 else
-  PUBLIC_FEEDS="manual,cisa-kev,nvd-recent"
+  PUBLIC_FEEDS="$DEFAULT_PUBLIC_FEEDS"
 fi
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/sec-watch"
 CACHE_FILE="$CACHE_DIR/status.env"
 DEP_REPORT_FILE="$CACHE_DIR/dependency-report.txt"
 DEP_HTML_REPORT_FILE="$CACHE_DIR/dependency-report.html"
 DEP_JSON_FILE="$CACHE_DIR/dependency-report.json"
-WATCH_CONFIG="${SEC_WATCH_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/sec-watch/watch.json}"
-TTL_SECONDS="${SEC_WATCH_TTL:-1800}"
-RECENT_DAYS="${SEC_WATCH_RECENT_DAYS:-7}"
-OS_ADVISORIES="${SEC_WATCH_OS_ADVISORIES:-1}"
+WATCH_CONFIG="${SEC_WATCH_CONFIG:-$DEFAULT_WATCH_CONFIG}"
+TTL_SECONDS="${SEC_WATCH_TTL:-$DEFAULT_TTL_SECONDS}"
+RECENT_DAYS="${SEC_WATCH_RECENT_DAYS:-$DEFAULT_RECENT_DAYS}"
+OS_ADVISORIES="${SEC_WATCH_OS_ADVISORIES:-$DEFAULT_OS_ADVISORIES}"
 CISA_KEV_URL="https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 NVD_RECENT_URL="https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-recent.json.gz"
 
@@ -739,7 +872,7 @@ case "${1:-argos}" in
     echo "watch_config=$WATCH_CONFIG"
     ;;
   *)
-    echo "Usage: sec-watch [argos|status]" >&2
+    echo "Usage: sec-watch [argos|status|lockfiles|defaults-env]" >&2
     exit 2
     ;;
 esac
