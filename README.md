@@ -128,6 +128,28 @@ repository mirrors and per-scan worktrees under:
 ~/.cache/sec-watch-web
 ```
 
+## Local CLI
+
+For a local-files-only scan without the webserver, run:
+
+```bash
+bin/sec-watch-local /path/to/project
+```
+
+This disables Fedora advisory checks and public watch feeds, then scans only the
+local dependency files under the selected directory. To scan a local Git branch
+without changing your working tree:
+
+```bash
+bin/sec-watch-local /path/to/repo --branch main
+```
+
+The CLI stores its run cache and reports under:
+
+```text
+~/.cache/sec-watch-local
+```
+
 ## Development
 
 After changing the schema:
