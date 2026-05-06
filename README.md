@@ -6,7 +6,7 @@ workstations.
 It reports:
 
 - local project dependency vulnerabilities from Trivy or OSV Scanner
-- optional public watch-feed matches from manual CVEs, CISA KEV, and NVD Recent
+- optional public watch-feed matches from CISA KEV and NVD Recent
 
 ## Requirements
 
@@ -67,7 +67,7 @@ Default values:
 - `SEC_WATCH_PROJECTS_DIR=$HOME/Projects`
 - `SEC_WATCH_PROJECTS=` scans all projects under the selected directory
 - `SEC_WATCH_ECOSYSTEMS=npm,yarn,pnpm,pip,poetry,uv,python-pkg`
-- `SEC_WATCH_PUBLIC_FEEDS=manual,cisa-kev,nvd-recent`
+- `SEC_WATCH_PUBLIC_FEEDS=cisa-kev,nvd-recent`
 - `SEC_WATCH_RECENT_DAYS=7`
 - `SEC_WATCH_CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/sec-watch/watch.json`
 
@@ -81,7 +81,7 @@ bin/sec-watch-local --public-feeds ''
 bin/sec-watch-local --debug
 ```
 
-Manual watch entries and public-feed keywords live in:
+Public-feed keywords live in:
 
 ```text
 ~/.config/sec-watch/watch.json

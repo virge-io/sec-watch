@@ -4,7 +4,7 @@ set -uo pipefail
 DEFAULT_PROJECTS_DIR="$HOME/Projects"
 DEFAULT_SELECTED_PROJECTS=""
 DEFAULT_ECOSYSTEMS="npm,yarn,pnpm,pip,poetry,uv,python-pkg"
-DEFAULT_PUBLIC_FEEDS="manual,cisa-kev,nvd-recent"
+DEFAULT_PUBLIC_FEEDS="cisa-kev,nvd-recent"
 DEFAULT_TTL_SECONDS="1800"
 DEFAULT_RECENT_DAYS="7"
 DEFAULT_WATCH_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/sec-watch/watch.json"
@@ -133,14 +133,6 @@ keywords_regex() {
   fi
 }
 
-count_manual_watch_cves() {
-  [[ -f "$WATCH_CONFIG" ]] || {
-    printf '0'
-    return
-  }
-
-  jq_count '.manual_cves // [] | map(select(.id // "" | length > 0)) | length' "$WATCH_CONFIG"
-}
 
 filter_trivy_json() {
   local json="$1"
@@ -476,7 +468,7 @@ write_trivy_dependency_report() {
 
 if [[ "${SEC_WATCH_FORCE:-0}" != "1" && -n "${UPDATED_AT:-}" && $((now - UPDATED_AT)) -lt "$TTL_SECONDS" ]]; then
   debug_log "using cached status from $CACHE_FILE"
-  : "${DEP_COUNT:=0}" "${DEP_HIGH_CRITICAL_COUNT:=0}" "${DEP_CRITICAL_COUNT:=0}" "${DEP_HIGH_COUNT:=0}" "${DEP_MEDIUM_COUNT:=0}" "${DEP_LOW_COUNT:=0}" "${DEP_RECENT_COUNT:=0}" "${DEP_RECENT_CRITICAL_COUNT:=0}" "${DEP_RECENT_HIGH_COUNT:=0}" "${DEP_REPORT_FILE:=$CACHE_DIR/dependency-report.txt}" "${DEP_HTML_REPORT_FILE:=$CACHE_DIR/dependency-report.html}" "${WATCH_COUNT:=0}" "${MANUAL_WATCH_COUNT:=0}" "${CISA_KEV_COUNT:=0}" "${CISA_KEV_RECENT_COUNT:=0}" "${NVD_RECENT_COUNT:=0}" "${RECENT_CHANGE_COUNT:=0}" "${SCANNER:=none}" "${SUMMARY:=cached}"
+  : "${DEP_COUNT:=0}" "${DEP_HIGH_CRITICAL_COUNT:=0}" "${DEP_CRITICAL_COUNT:=0}" "${DEP_HIGH_COUNT:=0}" "${DEP_MEDIUM_COUNT:=0}" "${DEP_LOW_COUNT:=0}" "${DEP_RECENT_COUNT:=0}" "${DEP_RECENT_CRITICAL_COUNT:=0}" "${DEP_RECENT_HIGH_COUNT:=0}" "${DEP_REPORT_FILE:=$CACHE_DIR/dependency-report.txt}" "${DEP_HTML_REPORT_FILE:=$CACHE_DIR/dependency-report.html}" "${WATCH_COUNT:=0}" "${CISA_KEV_COUNT:=0}" "${CISA_KEV_RECENT_COUNT:=0}" "${NVD_RECENT_COUNT:=0}" "${RECENT_CHANGE_COUNT:=0}" "${SCANNER:=none}" "${SUMMARY:=cached}"
 else
   debug_log "starting fresh scan"
   debug_log "cache dir: $CACHE_DIR"
@@ -494,7 +486,6 @@ else
   DEP_RECENT_CRITICAL_COUNT=0
   DEP_RECENT_HIGH_COUNT=0
   WATCH_COUNT=0
-  MANUAL_WATCH_COUNT=0
   CISA_KEV_COUNT=0
   CISA_KEV_RECENT_COUNT=0
   NVD_RECENT_COUNT=0
@@ -599,10 +590,6 @@ else
       fi
     fi
 
-    if feed_enabled manual; then
-      debug_log "counting manual watch CVEs"
-      MANUAL_WATCH_COUNT="$(count_manual_watch_cves)"
-    fi
 
     [[ -n "$_cisa_pid" ]] && wait "$_cisa_pid" || true
     [[ -n "$_nvd_pid" ]] && wait "$_nvd_pid" || true
@@ -647,7 +634,7 @@ else
       rm -f "$_nvd_tmp"
     fi
 
-    WATCH_COUNT=$((MANUAL_WATCH_COUNT + CISA_KEV_COUNT + NVD_RECENT_COUNT))
+    WATCH_COUNT=$((CISA_KEV_COUNT + NVD_RECENT_COUNT))
     debug_log "watch feed count: $WATCH_COUNT"
   else
     debug_log "public watch feeds unavailable or config missing"
@@ -671,7 +658,6 @@ else
     printf 'DEP_REPORT_FILE=%q\n' "$DEP_REPORT_FILE"
     printf 'DEP_HTML_REPORT_FILE=%q\n' "$DEP_HTML_REPORT_FILE"
     printf 'WATCH_COUNT=%q\n' "$WATCH_COUNT"
-    printf 'MANUAL_WATCH_COUNT=%q\n' "$MANUAL_WATCH_COUNT"
     printf 'CISA_KEV_COUNT=%q\n' "$CISA_KEV_COUNT"
     printf 'CISA_KEV_RECENT_COUNT=%q\n' "$CISA_KEV_RECENT_COUNT"
     printf 'NVD_RECENT_COUNT=%q\n' "$NVD_RECENT_COUNT"
