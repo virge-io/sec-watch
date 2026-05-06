@@ -1,4 +1,5 @@
 .cache/
+.venv/
 *.log
 gschemas.compiled
 /dependency-report.*

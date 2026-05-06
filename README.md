@@ -97,22 +97,24 @@ examples/dependency-report.txt
 The `sec-watch-web` branch also includes a FastAPI wrapper for scanning a Git
 repository and branch from a browser or JSON client.
 
-Install the Python server dependencies:
+Install `uv` if it is not already available, then sync the Python server
+dependencies:
 
 ```bash
-python3 -m pip install -r requirements.txt
+uv --version
+uv sync
 ```
 
 Run it locally:
 
 ```bash
-bin/sec-watch-server
+uv run bin/sec-watch-server
 ```
 
 For LAN access, bind to a LAN address and set a token:
 
 ```bash
-SEC_WATCH_WEB_TOKEN='change-me' bin/sec-watch-server --host 0.0.0.0
+SEC_WATCH_WEB_TOKEN='change-me' uv run bin/sec-watch-server --host 0.0.0.0
 ```
 
 LAN clients can pass the token as `X-Sec-Watch-Token`, `Authorization: Bearer
