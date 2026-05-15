@@ -5,3 +5,5 @@
 gschemas.compiled
 /dependency-report.*
 status.env
+bin-out/
+bin/__pycache__/
