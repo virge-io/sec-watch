@@ -30,36 +30,24 @@ without touching your working tree. It:
   persistent cache
 - supports `--json` output for scripting
 
-## Requirements
-
-- Go 1.26 or newer (build only — the compiled binary has no runtime dependencies)
-- `trivy` or `osv-scanner` for dependency scanning
-
 ## Install
 
-Clone the repo and build both binaries:
+Install Trivy:
 
 ```bash
-git clone <repo-url> sec-watch
-cd sec-watch
-CGO_ENABLED=0 go build -ldflags="-s -w" -o ~/.local/bin/sec-watch ./cmd/sec-watch
-CGO_ENABLED=0 go build -ldflags="-s -w" -o ~/.local/bin/sec-watch-local ./cmd/sec-watch-local
+curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b ~/.local/bin
+```
+
+Download the binaries:
+
+```bash
+for b in sec-watch sec-watch-local; do curl -fLo ~/.local/bin/$b https://raw.githubusercontent.com/virge-io/sec-watch/main/bin/$b; done && chmod +x ~/.local/bin/sec-watch ~/.local/bin/sec-watch-local
 ```
 
 Make sure `~/.local/bin` is on your `PATH`. Verify:
 
 ```bash
 sec-watch defaults-env
-```
-
-Install Trivy (recommended scanner):
-
-```bash
-# Fedora / RHEL
-sudo dnf install trivy
-
-# or via the official install script
-curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b ~/.local/bin
 ```
 
 Optionally install a keyword watch config:
