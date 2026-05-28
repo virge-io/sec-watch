@@ -16,6 +16,10 @@ const (
 	colorReset = "\033[0m"
 )
 
+func fileLink(path string) string {
+	return "\033]8;;file://" + path + "\033\\" + path + "\033]8;;\033\\"
+}
+
 func IsTTY(f *os.File) bool {
 	fi, err := f.Stat()
 	if err != nil {
@@ -37,27 +41,32 @@ func Print(w io.Writer, s *cache.Status, cfg *config.Config, tty bool) {
 	}
 
 	fields := []struct {
-		key   string
-		value string
+		key  string
+		val  string
+		link bool
 	}{
-		{"project_total", fmt.Sprint(s.DepCount)},
-		{"project_critical", fmt.Sprint(s.DepCriticalCount)},
-		{"project_high", fmt.Sprint(s.DepHighCount)},
-		{"project_medium", fmt.Sprint(s.DepMediumCount)},
-		{"project_low", fmt.Sprint(s.DepLowCount)},
-		{"project_recent", fmt.Sprint(s.DepRecentCount)},
-		{"project_recent_critical", fmt.Sprint(s.DepRecentCritical)},
-		{"project_recent_high", fmt.Sprint(s.DepRecentHigh)},
-		{"recent_changes", fmt.Sprint(s.RecentChangeCount)},
-		{"dependency_report", s.DepReportFile},
-		{"dependency_html_report", s.DepHTMLReportFile},
-		{"scanner", s.Scanner},
-		{"public_feeds", cfg.PublicFeeds},
-		{"watch_config", cfg.WatchConfig},
+		{"project_total", fmt.Sprint(s.DepCount), false},
+		{"project_critical", fmt.Sprint(s.DepCriticalCount), false},
+		{"project_high", fmt.Sprint(s.DepHighCount), false},
+		{"project_medium", fmt.Sprint(s.DepMediumCount), false},
+		{"project_low", fmt.Sprint(s.DepLowCount), false},
+		{"project_recent", fmt.Sprint(s.DepRecentCount), false},
+		{"project_recent_critical", fmt.Sprint(s.DepRecentCritical), false},
+		{"project_recent_high", fmt.Sprint(s.DepRecentHigh), false},
+		{"recent_changes", fmt.Sprint(s.RecentChangeCount), false},
+		{"dependency_report", s.DepReportFile, true},
+		{"dependency_html_report", s.DepHTMLReportFile, true},
+		{"scanner", s.Scanner, false},
+		{"public_feeds", cfg.PublicFeeds, false},
+		{"watch_config", cfg.WatchConfig, false},
 	}
 
 	for _, f := range fields {
-		fmt.Fprintf(w, "%s%s=%s%s\n", cyan, f.key, reset, f.value)
+		val := f.val
+		if tty && f.link && f.val != "" {
+			val = fileLink(f.val)
+		}
+		fmt.Fprintf(w, "%s%s=%s%s\n", cyan, f.key, reset, val)
 	}
 }
 

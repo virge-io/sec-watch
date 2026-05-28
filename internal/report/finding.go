@@ -8,6 +8,12 @@ import (
 	"github.com/virge/sec-watch/internal/scanner"
 )
 
+// ViaEntry holds one direct-dep ancestor that pulls in a vulnerable transitive dep.
+type ViaEntry struct {
+	Pkg    string // "name version" human-readable
+	Advice string // from registry lookup, may be ""
+}
+
 type Finding struct {
 	Rank               int
 	Severity           string
@@ -29,6 +35,8 @@ type Finding struct {
 	UserInteraction    string
 	UserInteractRank   int
 	Changed            string // only for recent mode
+	Indirect           bool
+	Via                []ViaEntry
 }
 
 func (f *Finding) CVSSScoreStr() string {
@@ -220,6 +228,21 @@ func MakeFinding(v *scanner.TrivyVuln, target string) Finding {
 		installed = "-"
 	}
 
+	via := make([]ViaEntry, len(v.Via))
+	for i, vk := range v.Via {
+		name, ver, _ := strings.Cut(vk, "@")
+		advice := ""
+		if i < len(v.ParentFixes) {
+			// ParentFixes entries are "name ver — advice" or "name ver"; strip the "name ver — " prefix.
+			pf := v.ParentFixes[i]
+			prefix := name + " " + ver + " — "
+			if strings.HasPrefix(pf, prefix) {
+				advice = strings.TrimPrefix(pf, prefix)
+			}
+		}
+		via[i] = ViaEntry{Pkg: name + " " + ver, Advice: advice}
+	}
+
 	return Finding{
 		Rank:              severityRank(v.Severity),
 		Severity:          v.Severity,
@@ -240,6 +263,8 @@ func MakeFinding(v *scanner.TrivyVuln, target string) Finding {
 		PrivilegesRank:    privRank,
 		UserInteraction:   interactionLabel(ui),
 		UserInteractRank:  interactionRank(ui),
+		Indirect:          v.PkgRelationship == "indirect",
+		Via:               via,
 	}
 }
 

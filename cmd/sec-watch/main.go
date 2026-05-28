@@ -132,6 +132,13 @@ func runDependencyScanner(cfg *config.Config, s *cache.Status, depJSONFile strin
 		debug("trivy scan complete, filtering results")
 		trivyResult = scanner.FilterTrivy(trivyResult, cfg.Ecosystems, cfg.SelectedProjects)
 
+		if cfg.RegistryLookup {
+			debug("enriching parent fix info from registries")
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			scanner.EnrichParentFixes(ctx, trivyResult)
+		}
+
 		raw, _ := json.MarshalIndent(trivyResult, "", "  ")
 		_ = os.WriteFile(depJSONFile, raw, 0o644)
 
@@ -185,7 +192,7 @@ func writeReports(cfg *config.Config, s *cache.Status, result *scanner.TrivyResu
 
 	debug("writing HTML report")
 	var htmlBuf bytes.Buffer
-	if err := report.WriteHTML(&htmlBuf, result, s, cfg.ProjectsDir, cfg.RecentDays); err == nil {
+	if err := report.WriteHTML(&htmlBuf, result, s, cfg.ProjectsDir); err == nil {
 		_ = os.WriteFile(s.DepHTMLReportFile, htmlBuf.Bytes(), 0o644)
 	}
 }

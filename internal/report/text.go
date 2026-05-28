@@ -62,7 +62,29 @@ func WriteText(w io.Writer, result *scanner.TrivyResult, s *cache.Status, recent
 
 func writeBlock(w io.Writer, n int, f *Finding, showChanged bool) {
 	fmt.Fprintf(w, "%d. %s %s (CVSS %s)\n", n, f.Severity, f.ID, f.CVSSScoreStr())
-	fmt.Fprintf(w, "   Package: %s %s -> %s\n", f.Package, f.Installed, f.Fixed)
+	if f.Indirect {
+		fmt.Fprintf(w, "   Package: %s %s [indirect]\n", f.Package, f.Installed)
+		if f.Fixed != "-" {
+			fmt.Fprintf(w, "   Fix: needs %s >= %s\n", f.Package, f.Fixed)
+		} else {
+			fmt.Fprintf(w, "   Fix: no fixed version known\n")
+		}
+		if len(f.Via) > 0 {
+			for i, ve := range f.Via {
+				prefix := "   Via:"
+				if i > 0 {
+					prefix = "       "
+				}
+				if ve.Advice != "" {
+					fmt.Fprintf(w, "%s %s — %s\n", prefix, ve.Pkg, ve.Advice)
+				} else {
+					fmt.Fprintf(w, "%s %s\n", prefix, ve.Pkg)
+				}
+			}
+		}
+	} else {
+		fmt.Fprintf(w, "   Package: %s %s -> %s\n", f.Package, f.Installed, f.Fixed)
+	}
 	fmt.Fprintf(w, "   Target: %s\n", f.Target)
 	if showChanged && f.Changed != "" {
 		fmt.Fprintf(w, "   Changed: %s\n", f.Changed)

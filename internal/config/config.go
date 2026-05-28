@@ -19,17 +19,18 @@ const (
 )
 
 type Config struct {
-	ProjectsDir     string
+	ProjectsDir      string
 	SelectedProjects string
-	Ecosystems      string
-	PublicFeeds     string
-	TTLSeconds      int
-	RecentDays      int
-	WatchConfig     string
-	CacheDir        string
-	Force           bool
-	Debug           bool
-	DebugFile       string
+	Ecosystems       string
+	PublicFeeds      string
+	TTLSeconds       int
+	RecentDays       int
+	WatchConfig      string
+	CacheDir         string
+	Force            bool
+	Debug            bool
+	DebugFile        string
+	RegistryLookup   bool
 }
 
 func Load() *Config {
@@ -57,6 +58,7 @@ func Load() *Config {
 	c.Force = os.Getenv("SEC_WATCH_FORCE") == "1"
 	c.Debug = os.Getenv("SEC_WATCH_DEBUG") == "1"
 	c.DebugFile = os.Getenv("SEC_WATCH_DEBUG_FILE")
+	c.RegistryLookup = os.Getenv("SEC_WATCH_REGISTRY_LOOKUP") != "0" // default on
 
 	return c
 }

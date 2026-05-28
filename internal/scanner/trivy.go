@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
@@ -13,23 +14,35 @@ type TrivyResult struct {
 }
 
 type TrivyTarget struct {
-	Target          string            `json:"Target"`
-	Type            string            `json:"Type"`
-	Vulnerabilities []TrivyVuln       `json:"Vulnerabilities"`
+	Target          string        `json:"Target"`
+	Type            string        `json:"Type"`
+	Vulnerabilities []TrivyVuln   `json:"Vulnerabilities"`
+	Packages        []TrivyPkg    `json:"Packages"`
+}
+
+type TrivyPkg struct {
+	Name         string   `json:"Name"`
+	Version      string   `json:"Version"`
+	Relationship string   `json:"Relationship"`
+	DependsOn    []string `json:"DependsOn"`
 }
 
 type TrivyVuln struct {
-	VulnerabilityID  string            `json:"VulnerabilityID"`
-	PkgName          string            `json:"PkgName"`
-	InstalledVersion string            `json:"InstalledVersion"`
-	FixedVersion     string            `json:"FixedVersion"`
-	Severity         string            `json:"Severity"`
-	Title            string            `json:"Title"`
-	Description      string            `json:"Description"`
-	PrimaryURL       string            `json:"PrimaryURL"`
-	LastModifiedDate string            `json:"LastModifiedDate"`
-	PublishedDate    string            `json:"PublishedDate"`
+	VulnerabilityID  string               `json:"VulnerabilityID"`
+	PkgName          string               `json:"PkgName"`
+	InstalledVersion string               `json:"InstalledVersion"`
+	FixedVersion     string               `json:"FixedVersion"`
+	Severity         string               `json:"Severity"`
+	Title            string               `json:"Title"`
+	Description      string               `json:"Description"`
+	PrimaryURL       string               `json:"PrimaryURL"`
+	LastModifiedDate string               `json:"LastModifiedDate"`
+	PublishedDate    string               `json:"PublishedDate"`
 	CVSS             map[string]CVSSEntry `json:"CVSS"`
+	PkgRelationship  string               `json:"PkgRelationship"`
+	Via              []string             `json:"-"` // "name@version" of direct-dep ancestors
+	ParentFixes      []string             `json:"-"` // one advice string per Via entry (same index)
+	Ecosystem        string               `json:"-"` // copied from TrivyTarget.Type
 }
 
 type CVSSEntry struct {
@@ -146,7 +159,7 @@ func RunTrivy(projectsDir string) (*TrivyResult, error) {
 	if _, err := exec.LookPath("trivy"); err != nil {
 		return nil, fmt.Errorf("trivy not found")
 	}
-	out, err := exec.Command("trivy", "fs", "--scanners", "vuln", "--format", "json", projectsDir).Output()
+	out, err := exec.Command("trivy", "fs", "--scanners", "vuln", "--format", "json", "--list-all-pkgs", projectsDir).Output()
 	if err != nil {
 		// trivy exits non-zero when vulns found; try to parse anyway
 		if len(out) == 0 {
@@ -157,7 +170,78 @@ func RunTrivy(projectsDir string) (*TrivyResult, error) {
 	if err := json.Unmarshal(out, &result); err != nil {
 		return nil, fmt.Errorf("trivy output parse: %w", err)
 	}
+	EnrichRelationships(&result)
 	return &result, nil
+}
+
+// EnrichRelationships copies the Relationship field from the Packages list onto
+// each vulnerability's PkgRelationship, sets Ecosystem from the target Type,
+// and computes Via (direct-dep ancestors) for indirect vulnerabilities.
+func EnrichRelationships(result *TrivyResult) {
+	for i := range result.Results {
+		target := &result.Results[i]
+		if len(target.Packages) == 0 {
+			continue
+		}
+
+		// Build relationship and reverse-dependency maps.
+		rel := make(map[string]string, len(target.Packages))
+		// reverseDeps maps "name@version" -> list of parent "name@version" keys
+		reverseDeps := make(map[string][]string)
+		for _, p := range target.Packages {
+			key := p.Name + "@" + p.Version
+			rel[key] = p.Relationship
+			for _, dep := range p.DependsOn {
+				reverseDeps[dep] = append(reverseDeps[dep], key)
+			}
+		}
+
+		for j := range target.Vulnerabilities {
+			v := &target.Vulnerabilities[j]
+			v.Ecosystem = target.Type
+			if v.PkgRelationship == "" {
+				v.PkgRelationship = rel[v.PkgName+"@"+v.InstalledVersion]
+			}
+			if v.PkgRelationship == "indirect" {
+				v.Via = bfsDirectAncestors(v.PkgName+"@"+v.InstalledVersion, reverseDeps, rel)
+			}
+		}
+	}
+}
+
+// bfsDirectAncestors performs a BFS upward through reverseDeps from start,
+// returning all "name@version" keys whose Relationship is "direct".
+func bfsDirectAncestors(start string, reverseDeps map[string][]string, rel map[string]string) []string {
+	visited := map[string]bool{start: true}
+	queue := []string{start}
+	var results []string
+
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+		for _, parent := range reverseDeps[curr] {
+			if visited[parent] {
+				continue
+			}
+			visited[parent] = true
+			r := rel[parent]
+			if r == "direct" {
+				results = append(results, parent)
+			} else if r != "root" {
+				queue = append(queue, parent)
+			}
+		}
+	}
+
+	sort.Strings(results)
+	// deduplicate (sort makes duplicates adjacent)
+	out := results[:0]
+	for k, v := range results {
+		if k == 0 || results[k-1] != v {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func splitCSV(s string) []string {
