@@ -6,121 +6,224 @@ workstations.
 It reports:
 
 - local project dependency vulnerabilities from Trivy or OSV Scanner
-- optional public watch-feed matches from manual CVEs, CISA KEV, and NVD Recent
+- direct vs transitive (indirect) classification for each vulnerability
+- the direct dependency chain that pulls in each transitive vulnerable package
+- optional registry lookups (PyPI, npm) to check if a newer version of that
+  direct dep resolves the issue
+- optional public watch-feed matches from CISA KEV and NVD Recent
+
+## Binaries
+
+**`sec-watch`** is the core scanner. It scans your projects directory, fetches
+public vulnerability feeds, caches results with a TTL, and prints a status line.
+It is designed to run continuously — for example, triggered by a shell prompt or
+status bar widget.
+
+**`sec-watch-local`** is a one-shot wrapper around `sec-watch`. Use it when you
+want to scan on demand, point at a specific directory, or scan a local Git branch
+without touching your working tree. It:
+
+- accepts a `PATH` argument (defaults to the same projects dir as `sec-watch`)
+- with `--branch <name>`, clones a local mirror of the repo and checks the branch
+  out into a temporary worktree before scanning
+- runs `sec-watch` in an isolated per-run cache directory so it never touches the
+  persistent cache
+- supports `--json` output for scripting
 
 ## Requirements
 
-- Python 3.10 or newer
-- Bash, `jq`, `curl`, and `gzip`
+- Go 1.26 or newer (build only — the compiled binary has no runtime dependencies)
 - `trivy` or `osv-scanner` for dependency scanning
 
-Install these runtime packages with your system package manager:
+## Install
 
-```text
-trivy jq curl
+Clone the repo and build both binaries:
+
+```bash
+git clone <repo-url> sec-watch
+cd sec-watch
+CGO_ENABLED=0 go build -ldflags="-s -w" -o ~/.local/bin/sec-watch ./cmd/sec-watch
+CGO_ENABLED=0 go build -ldflags="-s -w" -o ~/.local/bin/sec-watch-local ./cmd/sec-watch-local
+```
+
+Make sure `~/.local/bin` is on your `PATH`. Verify:
+
+```bash
+sec-watch defaults-env
+```
+
+Install Trivy (recommended scanner):
+
+```bash
+# Fedora / RHEL
+sudo dnf install trivy
+
+# or via the official install script
+curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b ~/.local/bin
+```
+
+Optionally install a keyword watch config:
+
+```bash
+mkdir -p ~/.config/sec-watch
+cp config/watch.example.json ~/.config/sec-watch/watch.json
+# edit ~/.config/sec-watch/watch.json to add your keywords
 ```
 
 ## Usage
 
-Run a scan from the shared projects directory:
+Run a scan from the default projects directory (`~/Projects`):
 
 ```bash
-bin/sec-watch-local
+sec-watch-local
 ```
 
-With no path, the CLI starts from `~/Projects`. To scan a specific local
-directory:
+Scan a specific local directory:
 
 ```bash
-bin/sec-watch-local /path/to/project
+sec-watch-local /path/to/project
 ```
 
-To scan a local Git branch without changing your working tree:
+Scan a local Git branch without changing your working tree:
 
 ```bash
-bin/sec-watch-local /path/to/repo --branch main
+sec-watch-local /path/to/repo --branch main
 ```
 
-Normal output prints progress to stderr and a summary to stdout. JSON mode keeps
-stdout machine-readable until the final result:
+Scan a remote GitHub repo (clone first):
 
 ```bash
-bin/sec-watch-local --json
+git clone --depth=1 https://github.com/org/repo /tmp/repo-scan
+sec-watch-local /tmp/repo-scan
 ```
 
-Debug mode prints effective scanner settings and internal scanner milestones:
+Machine-readable JSON output:
 
 ```bash
-bin/sec-watch-local --debug --progress-interval 1
+sec-watch-local --json
 ```
+
+Debug mode — prints effective scanner settings and internal scan milestones:
+
+```bash
+sec-watch-local --debug --progress-interval 1
+```
+
+Check defaults and current configuration:
+
+```bash
+sec-watch defaults-env
+```
+
+## Transitive dependency analysis
+
+For each vulnerability, sec-watch classifies the affected package as **direct**
+or **indirect** (transitive). Indirect findings include:
+
+- which direct dependency or dependencies pull in the vulnerable package (the
+  "via" chain, resolved by BFS through the lockfile dependency graph)
+- a registry lookup against PyPI or npm for each direct parent to find whether
+  its latest release constrains the transitive dep to a fixed version
+
+Example text report output:
+
+```
+1. CRITICAL CVE-2026-42208 (CVSS 9.8)
+   Package: litellm 1.83.0 [indirect]
+   Fix: needs litellm >= 1.83.7
+   Via: orchestrator-core 5.0.1 — latest 5.0.2 still allows unfixed litellm (>=1.80.0)
+   Target: uv.lock
+   ...
+```
+
+If the latest release of the direct dep does require a fixed version, the advice
+will say so and name the version to upgrade to. If the package is private and not
+on the public registry, that is noted too.
+
+Registry lookups add a few seconds to each scan. Set
+`SEC_WATCH_REGISTRY_LOOKUP=0` to disable them for offline or faster runs.
 
 ## Configuration
 
-Defaults are centralized in:
+All defaults can be overridden via environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `SEC_WATCH_PROJECTS_DIR` | `~/Projects` | Root directory to scan |
+| `SEC_WATCH_PROJECTS` | *(all)* | Comma-separated project name filter |
+| `SEC_WATCH_ECOSYSTEMS` | `npm,yarn,pnpm,pip,poetry,uv,python-pkg` | Dependency ecosystems to include |
+| `SEC_WATCH_PUBLIC_FEEDS` | `cisa-kev,nvd-recent` | Public CVE feeds to query |
+| `SEC_WATCH_RECENT_DAYS` | `7` | Lookback window for "recent" changes |
+| `SEC_WATCH_TTL` | `1800` | Cache TTL in seconds |
+| `SEC_WATCH_CONFIG` | `~/.config/sec-watch/watch.json` | Watch config path |
+| `SEC_WATCH_REGISTRY_LOOKUP` | `1` | Set to `0` to skip PyPI/npm lookups |
+| `SEC_WATCH_FORCE` | `0` | Set to `1` to bypass the cache |
+| `SEC_WATCH_DEBUG` | `0` | Set to `1` for debug output |
+
+The `sec-watch-local` wrapper also accepts flags and `SEC_WATCH_LOCAL_*` overrides:
 
 ```bash
-bin/sec-watch defaults-env
+# Scan a different projects root
+SEC_WATCH_PROJECTS_DIR=~/Code sec-watch-local
+
+# Filter to specific ecosystems
+sec-watch-local --ecosystems npm,pip
+
+# Disable public feeds
+sec-watch-local --public-feeds ''
+
+# Override recent-days lookback
+sec-watch-local --recent-days 14
 ```
 
-Default values:
+### Watch config
 
-- `SEC_WATCH_PROJECTS_DIR=$HOME/Projects`
-- `SEC_WATCH_PROJECTS=` scans all projects under the selected directory
-- `SEC_WATCH_ECOSYSTEMS=npm,yarn,pnpm,pip,poetry,uv,python-pkg`
-- `SEC_WATCH_PUBLIC_FEEDS=manual,cisa-kev,nvd-recent`
-- `SEC_WATCH_RECENT_DAYS=7`
-- `SEC_WATCH_CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/sec-watch/watch.json`
+Public-feed keyword matching is configured in `~/.config/sec-watch/watch.json`:
 
-Every `SEC_WATCH_*` value can be overridden in the environment. The local CLI
-also accepts matching flags or `SEC_WATCH_LOCAL_*` overrides:
-
-```bash
-SEC_WATCH_PROJECTS_DIR=~/Code bin/sec-watch-local
-SEC_WATCH_LOCAL_ECOSYSTEMS=npm,pip bin/sec-watch-local
-bin/sec-watch-local --public-feeds ''
-bin/sec-watch-local --debug
+```json
+{
+  "lookback_days": 14,
+  "keywords": [
+    "openssh",
+    "openssl",
+    "linux kernel",
+    "node.js"
+  ]
+}
 ```
 
-Manual watch entries and public-feed keywords live in:
-
-```text
-~/.config/sec-watch/watch.json
-```
-
-This repo includes a starter template:
-
-```text
-config/watch.example.json
-```
+The `keywords` list is matched case-insensitively against CVE IDs, vendor
+names, product names, and descriptions in both CISA KEV and NVD. A starter
+template is at `config/watch.example.json`.
 
 ## Reports
 
-The local CLI stores each run under:
+Each scan writes reports to `~/.cache/sec-watch/`:
 
-```text
-~/.cache/sec-watch-local/jobs/
-```
+| File | Description |
+|---|---|
+| `dependency-report.txt` | Terminal-formatted findings with CVSS details and via chain |
+| `dependency-report.html` | Sortable HTML table with indirect badge and fix/via column |
+| `dependency-report.json` | Raw Trivy output |
 
-Each scan writes report paths in the final output:
+Both the text and HTML reports mark transitive packages with an `[indirect]`
+label. The HTML report's **Fix / Via** column shows the fix version and the
+direct dep chain inline. Tables can be sorted by clicking any column header.
 
-```text
-dependency-report.html
-dependency-report.txt
-dependency-report.json
-```
-
-`dependency-report.txt` is formatted for terminal reading with short finding
-blocks. Trivy reports include CVSS score, attack vector, attack complexity,
-privileges, and user interaction. The HTML tables can be sorted by clicking
-column headers.
+`sec-watch-local` run artefacts are kept under `~/.cache/sec-watch-local/jobs/`
+for post-scan inspection.
 
 ## Development
 
-There is no package manager or build step for the CLI branch. Before handing off
-changes, run:
+Build and verify:
 
 ```bash
-bash -n bin/sec-watch
-python3 -m py_compile bin/sec-watch-local
-git diff --check
+go build ./...
+go vet ./...
+```
+
+To test without touching the real cache:
+
+```bash
+XDG_CACHE_HOME=$(mktemp -d) SEC_WATCH_FORCE=1 sec-watch status
 ```

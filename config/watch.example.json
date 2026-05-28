@@ -21,13 +21,5 @@
     "python",
     "node.js",
     "npm"
-  ],
-  "manual_cves": [
-    {
-      "id": "CVE-2026-31431",
-      "name": "Copy Fail",
-      "component": "linux kernel",
-      "source": "https://copy.fail/"
-    }
   ]
 }
