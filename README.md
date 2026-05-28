@@ -38,10 +38,28 @@ Install Trivy:
 curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b ~/.local/bin
 ```
 
-Download the binaries:
+Download the latest binaries from [GitHub Releases](https://github.com/virge-io/sec-watch/releases):
 
 ```bash
-for b in sec-watch sec-watch-local; do curl -fLo ~/.local/bin/$b https://raw.githubusercontent.com/virge-io/sec-watch/main/bin/$b; done && chmod +x ~/.local/bin/sec-watch ~/.local/bin/sec-watch-local
+TAG=$(curl -fsSL https://api.github.com/repos/virge-io/sec-watch/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+for b in sec-watch sec-watch-local; do
+  curl -fLo ~/.local/bin/$b \
+    "https://github.com/virge-io/sec-watch/releases/download/${TAG}/${b}-${OS}-${ARCH}"
+done
+chmod +x ~/.local/bin/sec-watch ~/.local/bin/sec-watch-local
+```
+
+Verify the MD5 checksums (optional):
+
+```bash
+SUMS=$(curl -fsSL "https://github.com/virge-io/sec-watch/releases/download/${TAG}/md5sums.txt")
+for b in sec-watch sec-watch-local; do
+  expected=$(printf '%s\n' "$SUMS" | grep "${b}-${OS}-${ARCH}" | awk '{print $1}')
+  actual=$(md5sum ~/.local/bin/$b | awk '{print $1}')
+  [ "$expected" = "$actual" ] && echo "$b: OK" || echo "$b: MISMATCH"
+done
 ```
 
 Make sure `~/.local/bin` is on your `PATH`. Verify:
