@@ -1,3 +1,3 @@
-module github.com/virge/sec-watch
+module sec-watch
 
 go 1.26.3

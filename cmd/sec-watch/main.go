@@ -11,12 +11,12 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/virge/sec-watch/internal/cache"
-	"github.com/virge/sec-watch/internal/config"
-	"github.com/virge/sec-watch/internal/feeds"
-	"github.com/virge/sec-watch/internal/report"
-	"github.com/virge/sec-watch/internal/scanner"
-	"github.com/virge/sec-watch/internal/status"
+	"sec-watch/internal/cache"
+	"sec-watch/internal/config"
+	"sec-watch/internal/feeds"
+	"sec-watch/internal/report"
+	"sec-watch/internal/scanner"
+	"sec-watch/internal/status"
 )
 
 func main() {

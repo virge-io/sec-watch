@@ -5,7 +5,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/virge/sec-watch/internal/scanner"
+	"sec-watch/internal/scanner"
 )
 
 // ViaEntry holds one direct-dep ancestor that pulls in a vulnerable transitive dep.

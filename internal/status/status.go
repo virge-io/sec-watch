@@ -5,8 +5,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/virge/sec-watch/internal/cache"
-	"github.com/virge/sec-watch/internal/config"
+	"sec-watch/internal/cache"
+	"sec-watch/internal/config"
 )
 
 const (

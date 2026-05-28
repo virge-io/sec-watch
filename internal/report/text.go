@@ -6,8 +6,8 @@ import (
 	"sort"
 	"time"
 
-	"github.com/virge/sec-watch/internal/cache"
-	"github.com/virge/sec-watch/internal/scanner"
+	"sec-watch/internal/cache"
+	"sec-watch/internal/scanner"
 )
 
 func WriteText(w io.Writer, result *scanner.TrivyResult, s *cache.Status, recentDays int) {

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/virge/sec-watch/internal/registry"
+	"sec-watch/internal/registry"
 )
 
 type lookupKey struct{ ecosystem, parent, child, fixed string }

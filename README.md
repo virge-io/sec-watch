@@ -12,6 +12,24 @@ It reports:
   direct dep resolves the issue
 - optional public watch-feed matches from CISA KEV and NVD Recent
 
+## Binaries
+
+**`sec-watch`** is the core scanner. It scans your projects directory, fetches
+public vulnerability feeds, caches results with a TTL, and prints a status line.
+It is designed to run continuously — for example, triggered by a shell prompt or
+status bar widget.
+
+**`sec-watch-local`** is a one-shot wrapper around `sec-watch`. Use it when you
+want to scan on demand, point at a specific directory, or scan a local Git branch
+without touching your working tree. It:
+
+- accepts a `PATH` argument (defaults to the same projects dir as `sec-watch`)
+- with `--branch <name>`, clones a local mirror of the repo and checks the branch
+  out into a temporary worktree before scanning
+- runs `sec-watch` in an isolated per-run cache directory so it never touches the
+  persistent cache
+- supports `--json` output for scripting
+
 ## Requirements
 
 - Go 1.26 or newer (build only — the compiled binary has no runtime dependencies)

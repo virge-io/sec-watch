@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/virge/sec-watch/internal/cache"
-	"github.com/virge/sec-watch/internal/scanner"
+	"sec-watch/internal/cache"
+	"sec-watch/internal/scanner"
 )
 
 var htmlTmpl = template.Must(template.New("html").Funcs(template.FuncMap{
